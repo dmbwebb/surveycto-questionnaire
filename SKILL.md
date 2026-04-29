@@ -451,6 +451,15 @@ Use language suffixes:
 
 Set `default_language = English` in settings sheet.
 
+### Randomization
+
+For RCT-style randomization (choice-order shuffling, A/B arm assignment, counterbalancing block order, list/item-count experiments, pre-randomized lists via `pulldata`, etc.) see [`references/randomization-patterns.md`](references/randomization-patterns.md). Covers 9 transferable patterns with XLSForm rows + gotchas.
+
+Quickest hits:
+- Shuffle choices on one select with reproducible seed + pinned "Other": `appearance: randomized(${respondent_id}, 0, 2)` — args are `(seed, top_excluded, bottom_excluded)`, not `(seed, min, max)`.
+- Stable A/B switch: `calculate` with `once(random())`, then `if(${draw} > 0.5, 'a', 'b')`. Never put `random()` directly in `relevance`.
+- Random order of N items per respondent: pre-randomize externally, save as `;`-separated string, pull with `pulldata`, unpack via `item-at(';', list, index() - 1)` inside a `begin repeat`.
+
 ## Naming Conventions
 
 **Question names:**
