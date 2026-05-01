@@ -30,6 +30,14 @@ When the form lives as a Google Sheet (the K2 baseline/midline/endline pattern),
 | `set_text_color` / `get_text_color` | Foreground (text) color — for translation-status semantics |
 | `gsheet_io.get_drive_modified_time` / `get_drive_version` | Whole-file change sentinels (note: propagation can lag 30s+ — use `update_cell_checked` for tight loops) |
 
+### Concurrency, rate limits, row shifts
+
+When the user (or another concurrent agent) is editing the gsheet alongside you, three things bite:
+
+- **Sheets API rate limit is 60 reads/min/user.** Per-cell `update_cell_checked` does ~2 calls per cell (one read, one write); 30+ cells in a tight loop will hit HTTP 429. For bulk writes to one column across many rows, use `values().batchUpdate` directly — one call covers all rows. The `gsheet_edit.sheets_service()` helper returns the same authed client, so you can build a `data: [{range, values}, ...]` body and ship it as a single batch. Read once via the exported xlsx (no API hit) to confirm preconditions, then batch-write.
+- **Row numbers shift under you.** If you scan via `gsheet_io.exported_xlsx(doc_id)` and then write minutes later, a concurrent insertion above your target rows will shift everything down, and your row-number-keyed writes go to the wrong rows. The cell values *do* move with the content under insert/delete, so writes you already made stay correct — but verifications using stale row numbers will look broken even when the live state is fine. For risky write batches, prefer `find_row_by_value(tab, 'name', '<field_name>')` over hard-coded row numbers, and verify by name (not row) afterward.
+- **Disabling a field requires updating its callers.** Before setting `disabled = yes`, grep the survey for `${field_name}` references in `relevance`, `constraint`, `calculation`, `label`, `choice_filter`, `repeat_count`, `required` (and the choices sheet). Either drop those refs or update the formulas — leaving them produces "field reference to non-existent field" errors at upload. Same applies to renames (already handled by `rename_variable`, but only it).
+
 ### Translation status convention (K2)
 
 K2 forms use an explicit `a_traduire` column in the survey/choices tabs to flag rows that still need Malagasy translation. **That is the canonical mechanism for this project.** Don't add red-text-on-Malagasy as a parallel channel — `a_traduire` is enough.
