@@ -1,0 +1,20 @@
+{
+  "_comment": "Copy to fixture_ids.json and replace placeholders with private Drive IDs. fixture_ids.json is gitignored.",
+  "fixtures_folder_id": "FOLDER_ID_FOR_EPHEMERAL_TEST_COPIES",
+  "fixtures": {
+    "bulletin_notes": {
+      "doc_id": "PERSISTENT_SMALL_FIXTURE_DOC_ID",
+      "source_doc_id": "OPTIONAL_ORIGINAL_SOURCE_DOC_ID",
+      "source_path": "optional/source/path.gsheet",
+      "approx_size_bytes": 0,
+      "use_for": "fast iteration; small form"
+    },
+    "school_survey": {
+      "doc_id": "PERSISTENT_LARGER_FIXTURE_DOC_ID",
+      "source_doc_id": "OPTIONAL_ORIGINAL_SOURCE_DOC_ID",
+      "source_path": "optional/source/path.gsheet",
+      "approx_size_bytes": 0,
+      "use_for": "stress test; larger form with full module structure"
+    }
+  }
+}

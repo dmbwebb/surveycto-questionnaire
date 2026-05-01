@@ -1,11 +1,9 @@
 """pytest fixtures for the surveycto-questionnaire skill (gsheet flow tests).
 
-Tests run against real Google Drive — they need a valid token at
-~/.claude/.google/token.json (shared with the google-sheets/google-drive skills).
-
-Test fixtures are persistent gsheet copies of K2 endline forms living in
-'_claude_test_fixtures/mada_gsheet_skill/' on dmbwebb's Drive. Doc_ids are
-pinned in tests/fixture_ids.json.
+Tests run against real Google Drive. They need a valid token at
+~/.claude/.google/token.json and local-only fixture IDs in tests/fixture_ids.json.
+Copy tests/fixture_ids.example.json to tests/fixture_ids.json and fill in real
+Drive IDs before running live tests.
 
 Two fixture flavours:
   - persistent_fixture(name)  -> doc_id of a long-lived test sheet (read-only-ish)
@@ -35,6 +33,11 @@ FIXTURE_IDS_PATH = Path(__file__).parent / "fixture_ids.json"
 
 @pytest.fixture(scope="session")
 def fixture_ids() -> dict:
+    if not FIXTURE_IDS_PATH.exists():
+        raise FileNotFoundError(
+            "Missing tests/fixture_ids.json. Copy tests/fixture_ids.example.json "
+            "to tests/fixture_ids.json and fill in real Drive fixture IDs."
+        )
     return json.loads(FIXTURE_IDS_PATH.read_text())
 
 

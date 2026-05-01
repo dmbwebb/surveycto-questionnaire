@@ -38,10 +38,11 @@ K2 forms use an explicit `a_traduire` column in the survey/choices tabs to flag 
 
 ### Tests
 
-Live tests live in `tests/` and run against persistent Drive copies of K2 endline forms (in `_claude_test_fixtures/mada_gsheet_skill/` on dmbwebb's Drive). Doc IDs are pinned in `tests/fixture_ids.json`. Each destructive test makes its own ephemeral copy and trashes it on exit — fixtures themselves stay clean.
+Live Google Sheets tests live in `tests/` and run against persistent Drive copies listed in local-only `tests/fixture_ids.json`. Start from `tests/fixture_ids.example.json`; the real fixture file is gitignored because it contains private Drive IDs. Each destructive test makes its own ephemeral copy and trashes it on exit, so fixtures themselves stay clean.
 
 ```bash
 cd ~/.claude/skills/surveycto-questionnaire
+cp tests/fixture_ids.example.json tests/fixture_ids.json  # then fill in real Drive IDs
 PYTHONPATH=scripts ~/.venvs/mada-gsheet-tests/bin/pytest tests/ -v -c tests/pytest.ini
 ```
 

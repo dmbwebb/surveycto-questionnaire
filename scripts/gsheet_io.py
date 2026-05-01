@@ -7,8 +7,7 @@ Two halves:
     drops on the local FS); build authed services using the shared
     ~/.claude/.google token.
 
-This is the canonical home of these helpers — the dev workspace at
-~/Code/mada_gsheet_skill_dev/ was bootstrap scaffolding.
+This is the canonical home of these helpers.
 """
 from __future__ import annotations
 
