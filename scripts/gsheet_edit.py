@@ -111,15 +111,20 @@ def _col_idx_to_letter(idx0: int) -> str:
     return get_column_letter(idx0 + 1)
 
 
+def _a1_cell(tab: TabHandle, col_letter: str, row: int) -> str:
+    """A1 notation for a single cell, e.g. ``'survey'!B7``."""
+    return f"'{tab.tab_title}'!{col_letter}{row}"
+
+
 def open_tab(doc_id: str, tab_title: str) -> TabHandle:
     """Fetch a tab's sheetId + header row in a single API round-trip."""
-    res = sheets_service().spreadsheets().get(
+    res = _execute_with_retry(sheets_service().spreadsheets().get(
         spreadsheetId=doc_id,
         ranges=[f"'{tab_title}'!1:1"],
         includeGridData=True,
         fields=("sheets.properties(sheetId,title),"
                 "sheets.data.rowData.values.formattedValue"),
-    ).execute()
+    ))
 
     for s in res.get("sheets", []):
         props = s["properties"]
@@ -142,10 +147,10 @@ def find_row_by_value(tab: TabHandle, header_name: str, value: str,
     or None if not found."""
     svc = sheets_service()
     col_letter = tab.col_letter(header_name)
-    res = svc.spreadsheets().values().get(
+    res = _execute_with_retry(svc.spreadsheets().values().get(
         spreadsheetId=tab.doc_id,
         range=f"'{tab.tab_title}'!{col_letter}{start_row}:{col_letter}",
-    ).execute()
+    ))
     col_values = [r[0] if r else "" for r in res.get("values", [])]
     target = str(value)
     for i, v in enumerate(col_values):
@@ -158,10 +163,10 @@ def get_cell(tab: TabHandle, row: int, header_name: str) -> str | None:
     """Read the value of the cell at ``(row, header_name)``."""
     svc = sheets_service()
     col_letter = tab.col_letter(header_name)
-    res = svc.spreadsheets().values().get(
+    res = _execute_with_retry(svc.spreadsheets().values().get(
         spreadsheetId=tab.doc_id,
-        range=f"'{tab.tab_title}'!{col_letter}{row}",
-    ).execute()
+        range=_a1_cell(tab, col_letter, row),
+    ))
     vals = res.get("values", [])
     if not vals or not vals[0]:
         return None
@@ -171,10 +176,10 @@ def get_cell(tab: TabHandle, row: int, header_name: str) -> str | None:
 def get_row(tab: TabHandle, row: int) -> dict[str, object]:
     """Read a whole data row as a dict keyed by header name."""
     svc = sheets_service()
-    res = svc.spreadsheets().values().get(
+    res = _execute_with_retry(svc.spreadsheets().values().get(
         spreadsheetId=tab.doc_id,
         range=f"'{tab.tab_title}'!{row}:{row}",
-    ).execute()
+    ))
     vals = res.get("values", [[]])[0]
     return {h: (vals[i] if i < len(vals) else "") for i, h in enumerate(tab.headers)}
 
@@ -183,12 +188,12 @@ def update_cell(tab: TabHandle, row: int, header_name: str, new_value) -> None:
     """Write a single cell. USER_ENTERED so formulas / numbers are parsed."""
     svc = sheets_service()
     col_letter = tab.col_letter(header_name)
-    svc.spreadsheets().values().update(
+    _execute_with_retry(svc.spreadsheets().values().update(
         spreadsheetId=tab.doc_id,
-        range=f"'{tab.tab_title}'!{col_letter}{row}",
+        range=_a1_cell(tab, col_letter, row),
         valueInputOption="USER_ENTERED",
         body={"values": [[new_value]]},
-    ).execute()
+    ))
 
 
 def update_cell_checked(tab: TabHandle, row: int, header_name: str,
@@ -236,7 +241,7 @@ def batch_update_cells(tab: TabHandle,
     for row, header_name, new_value in edits_list:
         col_letter = tab.col_letter(header_name)
         data.append({
-            "range": f"'{tab.tab_title}'!{col_letter}{row}",
+            "range": _a1_cell(tab, col_letter, row),
             "values": [[new_value]],
         })
     svc = sheets_service()
@@ -263,13 +268,13 @@ def append_row(tab: TabHandle, row_dict: Mapping[str, object]) -> int:
     """Append one row at the bottom of the tab. Returns the 1-based landed row."""
     svc = sheets_service()
     values = [row_dict.get(h, "") for h in tab.headers]
-    res = svc.spreadsheets().values().append(
+    res = _execute_with_retry(svc.spreadsheets().values().append(
         spreadsheetId=tab.doc_id,
         range=f"'{tab.tab_title}'!A1",
         valueInputOption="USER_ENTERED",
         insertDataOption="INSERT_ROWS",
         body={"values": [values]},
-    ).execute()
+    ))
     return _parse_last_appended_row(res)
 
 
@@ -287,7 +292,7 @@ def insert_row_at(tab: TabHandle, position_row: int,
         raise ValueError(f"position_row must be >= 1, got {position_row}")
 
     svc = sheets_service()
-    svc.spreadsheets().batchUpdate(
+    _execute_with_retry(svc.spreadsheets().batchUpdate(
         spreadsheetId=tab.doc_id,
         body={
             "requests": [{
@@ -302,16 +307,16 @@ def insert_row_at(tab: TabHandle, position_row: int,
                 },
             }],
         },
-    ).execute()
+    ))
 
     values = [row_dict.get(h, "") for h in tab.headers]
     last_col_letter = _col_idx_to_letter(len(tab.headers) - 1)
-    svc.spreadsheets().values().update(
+    _execute_with_retry(svc.spreadsheets().values().update(
         spreadsheetId=tab.doc_id,
         range=f"'{tab.tab_title}'!A{position_row}:{last_col_letter}{position_row}",
         valueInputOption="USER_ENTERED",
         body={"values": [values]},
-    ).execute()
+    ))
 
 
 def delete_row(tab: TabHandle, row: int) -> None:
@@ -319,7 +324,7 @@ def delete_row(tab: TabHandle, row: int) -> None:
     if row < 2:
         raise ValueError(f"row must be >= 2 (header is row 1), got {row}")
     svc = sheets_service()
-    svc.spreadsheets().batchUpdate(
+    _execute_with_retry(svc.spreadsheets().batchUpdate(
         spreadsheetId=tab.doc_id,
         body={
             "requests": [{
@@ -333,7 +338,7 @@ def delete_row(tab: TabHandle, row: int) -> None:
                 },
             }],
         },
-    ).execute()
+    ))
 
 
 # ---------- Variable reference rewriting ----------
@@ -370,10 +375,10 @@ def rename_variable(
     """
     svc = sheets_service()
 
-    res = svc.spreadsheets().values().get(
+    res = _execute_with_retry(svc.spreadsheets().values().get(
         spreadsheetId=tab.doc_id,
         range=f"'{tab.tab_title}'",
-    ).execute()
+    ))
     grid = res.get("values", [])
     if not grid:
         raise RuntimeError(f"Tab '{tab.tab_title}' is empty")
@@ -405,7 +410,7 @@ def rename_variable(
         if row[name_idx] == old_name:
             col_letter = _col_idx_to_letter(name_idx)
             updates_a1.append({
-                "range": f"'{tab.tab_title}'!{col_letter}{r_idx}",
+                "range": _a1_cell(tab, col_letter, r_idx),
                 "values": [[new_name]],
             })
             name_renamed += 1
@@ -417,19 +422,19 @@ def rename_variable(
             new_cell = str(cell).replace(old_ref, new_ref)
             col_letter = _col_idx_to_letter(c_idx)
             updates_a1.append({
-                "range": f"'{tab.tab_title}'!{col_letter}{r_idx}",
+                "range": _a1_cell(tab, col_letter, r_idx),
                 "values": [[new_cell]],
             })
             refs_updated += 1
 
     if updates_a1:
-        svc.spreadsheets().values().batchUpdate(
+        _execute_with_retry(svc.spreadsheets().values().batchUpdate(
             spreadsheetId=tab.doc_id,
             body={
                 "valueInputOption": "USER_ENTERED",
                 "data": updates_a1,
             },
-        ).execute()
+        ))
 
     return {"name_renamed": name_renamed, "references_updated": refs_updated}
 
@@ -496,13 +501,13 @@ def add_choice_list(
         raise ValueError("no choices to append")
 
     svc = sheets_service()
-    res = svc.spreadsheets().values().append(
+    res = _execute_with_retry(svc.spreadsheets().values().append(
         spreadsheetId=doc_id,
         range="'choices'!A1",
         valueInputOption="USER_ENTERED",
         insertDataOption="INSERT_ROWS",
         body={"values": rows_to_append},
-    ).execute()
+    ))
     return _parse_last_appended_row(res)
 
 
@@ -521,7 +526,7 @@ def set_text_color(
 
     svc = sheets_service()
     col_idx0 = tab.col_idx_0(header_name)
-    svc.spreadsheets().batchUpdate(
+    _execute_with_retry(svc.spreadsheets().batchUpdate(
         spreadsheetId=tab.doc_id,
         body={
             "requests": [{
@@ -546,7 +551,7 @@ def set_text_color(
                 },
             }],
         },
-    ).execute()
+    ))
 
 
 def get_text_color(tab: TabHandle, row: int, header_name: str
@@ -555,11 +560,11 @@ def get_text_color(tab: TabHandle, row: int, header_name: str
     svc = sheets_service()
     col_idx0 = tab.col_idx_0(header_name)
     col_letter = _col_idx_to_letter(col_idx0)
-    res = svc.spreadsheets().get(
+    res = _execute_with_retry(svc.spreadsheets().get(
         spreadsheetId=tab.doc_id,
-        ranges=[f"'{tab.tab_title}'!{col_letter}{row}"],
+        ranges=[_a1_cell(tab, col_letter, row)],
         fields="sheets.data.rowData.values.effectiveFormat.textFormat.foregroundColor",
-    ).execute()
+    ))
     try:
         cell = res["sheets"][0]["data"][0]["rowData"][0]["values"][0]
         c = cell["effectiveFormat"]["textFormat"]["foregroundColor"]
