@@ -59,6 +59,14 @@ class SurveyCTOChecker:
             if 'name' not in self.choices_df.columns and 'value' in self.choices_df.columns:
                 self.choices_df = self.choices_df.rename(columns={'value': 'name'})
 
+            # XLSForm spec is 'constraint message' (space); some teams use 'constraint_message'
+            # (underscore). Internally the checker uses the underscore form, so alias the spec
+            # name to it when the underscore form isn't present.
+            if ('constraint_message' not in self.survey_df.columns
+                    and 'constraint message' in self.survey_df.columns):
+                self.survey_df = self.survey_df.rename(
+                    columns={'constraint message': 'constraint_message'})
+
             # Filter out disabled rows from survey (preserve original indices for row reporting)
             if 'disabled' in self.survey_df.columns:
                 disabled_count = (self.survey_df['disabled'].astype(str).str.lower() == 'yes').sum()
