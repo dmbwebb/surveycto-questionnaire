@@ -39,6 +39,17 @@ When the user (or another concurrent agent) is editing the gsheet alongside you,
 - **Sheets API rate limit is 60 reads/min/user.** Per-cell `update_cell_checked` does ~2 calls per cell (one read, one write); 30+ cells in a tight loop will hit HTTP 429. Use `batch_update_cells(tab, edits)` (or the `bulk_set_column` shortcut) for bulk writes — one API call covers all rows, with built-in 429 retry. Read once via the exported xlsx (no API hit) to confirm preconditions, then batch-write.
 - **Row numbers shift under you.** If you scan via `gsheet_io.exported_xlsx(doc_id)` and then write minutes later, a concurrent insertion above your target rows will shift everything down, and your row-number-keyed writes go to the wrong rows. The cell values *do* move with the content under insert/delete, so writes you already made stay correct — but verifications using stale row numbers will look broken even when the live state is fine. For risky write batches, prefer `find_row_by_value(tab, 'name', '<field_name>')` over hard-coded row numbers, and verify by name (not row) afterward.
 - **Disabling a field requires updating its callers.** Before setting `disabled = yes`, grep the survey for `${field_name}` references in `relevance`, `constraint`, `calculation`, `label`, `choice_filter`, `repeat_count`, `required` (and the choices sheet). Either drop those refs or update the formulas — leaving them produces "field reference to non-existent field" errors at upload. Same applies to renames (already handled by `rename_variable`, but only it).
+- **Disabling a whole module needs `disabled=yes` on EVERY row, not just the `begin group`.** A group-level relevance like `0=1` hides the questions on the device but the checker still treats the rows as active and flags duplicate names if you've added replacement questions elsewhere. Use `bulk_set_column(tab, rows, 'disabled', 'yes')` over the row range. Reads via the exported xlsx skip these rows correctly once disabled.
+- **`find_row_by_value` returns the FIRST match, including disabled duplicates.** Survey forms commonly have an old disabled `pulldata` calculate at row ~150 and the active version at row ~400 with the same `name`. When you need the active row, scan the A:B range yourself with a single `values.get` call and filter by `(name, type)` together — that's also the rate-limit-friendly way to locate many anchors at once. Pattern:
+  ```python
+  svc = ge.sheets_service()
+  res = svc.spreadsheets().values().get(
+      spreadsheetId=tab.doc_id, range=f"'{tab.tab_title}'!A1:B"
+  ).execute()
+  values = res.get('values', [])
+  # then iterate values to find rows by (name, type) pair
+  ```
+- **Inserting multiple rows at the same position: insert in REVERSE order to get the final order you want.** `insert_row_at(tab, 537, X)` followed by `insert_row_at(tab, 537, Y)` ends up with `Y` at row 537 and `X` at 538, because the second insert pushes the first one down. To land `[X, Y, Z]` at row 537+, call `insert_row_at(tab, 537, Z)`, then `Y`, then `X`.
 
 ### Translation status convention (K2)
 
