@@ -21,7 +21,7 @@ When the form lives as a Google Sheet (the K2 baseline/midline/endline pattern),
 | `open_tab(doc_id, tab_title)` | Cache header layout + sheet_id for a tab |
 | `find_row_by_value(tab, header, value)` | Find row number by `name` (or any column) |
 | `get_cell` / `update_cell` | Single-cell read/write (USER_ENTERED parsing) |
-| `update_cell_checked` | Compare-and-swap: writes only if current value matches expected — best-effort guard against concurrent edits |
+| `update_cell_checked(tab, row, header, expected_old, new_value)` | Compare-and-swap: writes only if current value matches expected — best-effort guard against concurrent edits. Signature: `update_cell_checked(tab, row, header, expected_old, new_value)` (all positional, no kwargs). Returns `True` if write succeeded, `False` if current value did not match expected (CAS failed). |
 | `batch_update_cells(tab, edits)` | Write many cells in one API call; `edits` is `[(row, header, value), ...]`. No CAS — verify preconditions via a single bulk read. Retries on 429. |
 | `bulk_set_column(tab, rows, header, value)` | One-call sugar over `batch_update_cells` for setting the same value across many rows of one column (the "disable a module" pattern). |
 | `append_row(tab, row_dict)` | Append to bottom; returns landed row |
@@ -49,7 +49,19 @@ When the user (or another concurrent agent) is editing the gsheet alongside you,
   values = res.get('values', [])
   # then iterate values to find rows by (name, type) pair
   ```
-- **Inserting multiple rows at the same position: insert in REVERSE order to get the final order you want.** `insert_row_at(tab, 537, X)` followed by `insert_row_at(tab, 537, Y)` ends up with `Y` at row 537 and `X` at 538, because the second insert pushes the first one down. To land `[X, Y, Z]` at row 537+, call `insert_row_at(tab, 537, Z)`, then `Y`, then `X`.
+- **Inserting multiple rows at the same position: insert in REVERSE order to get the final order you want.** `insert_row_at(tab, 537, X)` followed by `insert_row_at(tab, 537, Y)` ends up with `Y` at row 537 and `X` at 538, because the second insert pushes the first one down. To land `[X, Y, Z]` at row 537+, call `insert_row_at(tab, 537, Z)`, then `Y`, then `X`. (Note: `insert_row_at` returns `None`; the landed row is the `position_row` arg you passed in.)
+- **Bulk row deletion (10+ rows): use `batchUpdate` with `deleteDimension` requests, bottom-up.** `delete_row` is single-row and will rate-limit on large jobs. For multiple contiguous ranges, send one `batchUpdate` with multiple `deleteDimension` requests, ordered bottom-to-top so earlier deletions don't shift later ranges. Pattern:
+  ```python
+  svc = gio.sheets_service()
+  reqs = []
+  for start, end in [(395, 427), (189, 219), (157, 187)]:  # bottom-up
+      reqs.append({"deleteDimension": {"range": {
+          "sheetId": tab.sheet_id, "dimension": "ROWS",
+          "startIndex": start - 1, "endIndex": end,  # API is 0-indexed, half-open
+      }}})
+  svc.spreadsheets().batchUpdate(spreadsheetId=tab.doc_id, body={"requests": reqs}).execute()
+  ```
+- **Dynamic choice lists referencing disabled roster fields produce 180+ "broken ref" errors even with no enabled consumer.** If a `pulldata`-style choice list (`list_hhmember`, etc.) has labels like `${hhmember1}` and the source `hhmember*` calculates are disabled, the checker flags every row in the choice list — even when the picker `select_one list_hhmember` is itself disabled. The choice list rows aren't auto-pruned. Fix: delete the dead choice-list rows outright (use the bulk-delete pattern above).
 
 ### Translation status convention (K2)
 
