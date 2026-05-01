@@ -21,6 +21,8 @@ from gsheet_edit import (
     StaleDataError,
     add_choice_list,
     append_row,
+    batch_update_cells,
+    bulk_set_column,
     delete_row,
     find_row_by_value,
     get_cell,
@@ -492,3 +494,55 @@ def test_delete_row_rejects_header_row(ephemeral_fixture):
     tab = open_tab(doc_id, "survey")
     with pytest.raises(ValueError):
         delete_row(tab, 1)
+
+
+# ---------- NEW: batch writes ----------
+
+@pytest.mark.live
+@pytest.mark.destructive
+def test_batch_update_cells_multi_column(ephemeral_fixture):
+    """batch_update_cells writes to several cells across multiple columns
+    in one API call. Verify each landed value via per-cell reads."""
+    doc_id = ephemeral_fixture("bulletin_notes")
+    tab = open_tab(doc_id, "survey")
+    edits = [
+        (2, "label", "BATCH_LABEL_2"),
+        (3, "label", "BATCH_LABEL_3"),
+        (2, "name",  "batch_name_2"),
+        (3, "name",  "batch_name_3"),
+    ]
+    res = batch_update_cells(tab, edits)
+    assert res.get("totalUpdatedCells") == 4
+    assert get_cell(tab, 2, "label") == "BATCH_LABEL_2"
+    assert get_cell(tab, 3, "label") == "BATCH_LABEL_3"
+    assert get_cell(tab, 2, "name") == "batch_name_2"
+    assert get_cell(tab, 3, "name") == "batch_name_3"
+
+
+@pytest.mark.live
+@pytest.mark.destructive
+def test_bulk_set_column_sets_same_value_across_rows(ephemeral_fixture):
+    """bulk_set_column flips one column to the same value across many rows
+    in one API call — the canonical "disable a module" or "mark required"
+    pattern."""
+    doc_id = ephemeral_fixture("bulletin_notes")
+    tab = open_tab(doc_id, "survey")
+    rows = [2, 3, 4, 5]
+    res = bulk_set_column(tab, rows, "label", "BULK_LABEL")
+    assert res.get("totalUpdatedCells") == 4
+    for r in rows:
+        assert get_cell(tab, r, "label") == "BULK_LABEL"
+
+
+def test_batch_update_cells_empty_is_noop():
+    """Empty edits list returns 0 counts without making an API call.
+
+    No fixture needed — the empty-input early-return must not require auth
+    or a live Sheet. Pass a sentinel object that would crash if touched."""
+    class _Sentinel:
+        def __getattr__(self, name):
+            raise AssertionError(
+                f"empty-input path must not touch tab (called .{name})"
+            )
+    res = batch_update_cells(_Sentinel(), [])
+    assert res == {"totalUpdatedCells": 0, "totalUpdatedRows": 0}

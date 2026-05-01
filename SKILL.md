@@ -22,6 +22,8 @@ When the form lives as a Google Sheet (the K2 baseline/midline/endline pattern),
 | `find_row_by_value(tab, header, value)` | Find row number by `name` (or any column) |
 | `get_cell` / `update_cell` | Single-cell read/write (USER_ENTERED parsing) |
 | `update_cell_checked` | Compare-and-swap: writes only if current value matches expected — best-effort guard against concurrent edits |
+| `batch_update_cells(tab, edits)` | Write many cells in one API call; `edits` is `[(row, header, value), ...]`. No CAS — verify preconditions via a single bulk read. Retries on 429. |
+| `bulk_set_column(tab, rows, header, value)` | One-call sugar over `batch_update_cells` for setting the same value across many rows of one column (the "disable a module" pattern). |
 | `append_row(tab, row_dict)` | Append to bottom; returns landed row |
 | `insert_row_at(tab, position, row_dict)` | Insert mid-tab, shifting rows down — preserves group structure |
 | `delete_row(tab, row)` | Remove a row (rejects header row 1) |
@@ -34,7 +36,7 @@ When the form lives as a Google Sheet (the K2 baseline/midline/endline pattern),
 
 When the user (or another concurrent agent) is editing the gsheet alongside you, three things bite:
 
-- **Sheets API rate limit is 60 reads/min/user.** Per-cell `update_cell_checked` does ~2 calls per cell (one read, one write); 30+ cells in a tight loop will hit HTTP 429. For bulk writes to one column across many rows, use `values().batchUpdate` directly — one call covers all rows. The `gsheet_edit.sheets_service()` helper returns the same authed client, so you can build a `data: [{range, values}, ...]` body and ship it as a single batch. Read once via the exported xlsx (no API hit) to confirm preconditions, then batch-write.
+- **Sheets API rate limit is 60 reads/min/user.** Per-cell `update_cell_checked` does ~2 calls per cell (one read, one write); 30+ cells in a tight loop will hit HTTP 429. Use `batch_update_cells(tab, edits)` (or the `bulk_set_column` shortcut) for bulk writes — one API call covers all rows, with built-in 429 retry. Read once via the exported xlsx (no API hit) to confirm preconditions, then batch-write.
 - **Row numbers shift under you.** If you scan via `gsheet_io.exported_xlsx(doc_id)` and then write minutes later, a concurrent insertion above your target rows will shift everything down, and your row-number-keyed writes go to the wrong rows. The cell values *do* move with the content under insert/delete, so writes you already made stay correct — but verifications using stale row numbers will look broken even when the live state is fine. For risky write batches, prefer `find_row_by_value(tab, 'name', '<field_name>')` over hard-coded row numbers, and verify by name (not row) afterward.
 - **Disabling a field requires updating its callers.** Before setting `disabled = yes`, grep the survey for `${field_name}` references in `relevance`, `constraint`, `calculation`, `label`, `choice_filter`, `repeat_count`, `required` (and the choices sheet). Either drop those refs or update the formulas — leaving them produces "field reference to non-existent field" errors at upload. Same applies to renames (already handled by `rename_variable`, but only it).
 
@@ -54,7 +56,7 @@ cp tests/fixture_ids.example.json tests/fixture_ids.json  # then fill in real Dr
 PYTHONPATH=scripts ~/.venvs/mada-gsheet-tests/bin/pytest tests/ -v -c tests/pytest.ini
 ```
 
-Currently 22 passing tests (read flow + write flow + multi-tab edits + insert-at-position + concurrent-edit detection + delete + foreground color round-trip).
+Currently 25 passing tests (read flow + write flow + multi-tab edits + insert-at-position + concurrent-edit detection + delete + foreground color round-trip + batch writes).
 
 
 

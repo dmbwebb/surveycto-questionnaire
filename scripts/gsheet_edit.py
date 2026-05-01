@@ -13,12 +13,38 @@ Sheets UI. Header row is row 1; data starts at row 2.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 
+from googleapiclient.errors import HttpError
 from openpyxl.utils import get_column_letter
 
 from gsheet_io import sheets_service
+
+
+def _execute_with_retry(request, *, max_attempts: int = 6, base_delay: float = 5.0):
+    """Execute a Google API request with exponential backoff on HTTP 429.
+
+    Sheets quotas a user to 60 reads/min and 60 writes/min. When a concurrent
+    caller (another agent, the user's browser) is also burning calls, a single
+    request can transiently fail with 429. This wrapper retries on 429 only;
+    any other HttpError or non-HTTP exception re-raises immediately.
+
+    Backoff: 5s, 10s, 20s, 40s, 80s, 160s. Max ~5min total before giving up.
+    """
+    last_err = None
+    for attempt in range(max_attempts):
+        try:
+            return request.execute()
+        except HttpError as e:
+            status = getattr(getattr(e, "resp", None), "status", None)
+            if status != 429:
+                raise
+            last_err = e
+            if attempt < max_attempts - 1:
+                time.sleep(base_delay * (2 ** attempt))
+    raise last_err
 
 # updates.updatedRange comes back like "survey!A11:D11" — capture the END row.
 # Must use [A-Z]+ (not \w+) — \w+ would greedy-eat digits and backtrack wrong.
@@ -183,6 +209,54 @@ def update_cell_checked(tab: TabHandle, row: int, header_name: str,
     if actual_norm != expected_norm:
         raise StaleDataError(row, header_name, expected_old, actual)
     update_cell(tab, row, header_name, new_value)
+
+
+def batch_update_cells(tab: TabHandle,
+                       edits: Iterable[tuple[int, str, object]]) -> dict:
+    """Apply many cell updates in a single Sheets API call.
+
+    edits: iterable of ``(row, header_name, new_value)`` tuples.
+
+    Trade-off vs ``update_cell_checked``: 1 API call (vs ~2N) and no
+    compare-and-swap. Caller is responsible for verifying preconditions ahead
+    of time — typically via a single bulk read through ``gsheet_io.exported_xlsx``.
+
+    Use this when writing 10+ cells at once would otherwise risk HTTP 429
+    (Sheets quota: 60 reads/min, 60 writes/min). Retries on 429 internally.
+
+    An empty ``edits`` iterable is a no-op — returns a synthetic
+    ``{"totalUpdatedCells": 0, "totalUpdatedRows": 0}`` without an API call.
+
+    Returns the API response dict (``totalUpdatedCells``, ``totalUpdatedRows``, …).
+    """
+    edits_list = list(edits)
+    if not edits_list:
+        return {"totalUpdatedCells": 0, "totalUpdatedRows": 0}
+    data = []
+    for row, header_name, new_value in edits_list:
+        col_letter = tab.col_letter(header_name)
+        data.append({
+            "range": f"'{tab.tab_title}'!{col_letter}{row}",
+            "values": [[new_value]],
+        })
+    svc = sheets_service()
+    return _execute_with_retry(
+        svc.spreadsheets().values().batchUpdate(
+            spreadsheetId=tab.doc_id,
+            body={"valueInputOption": "USER_ENTERED", "data": data},
+        )
+    )
+
+
+def bulk_set_column(tab: TabHandle, rows: Iterable[int],
+                    header_name: str, value) -> dict:
+    """Set the same value on the given rows in one column. One API call.
+
+    Convenience wrapper over ``batch_update_cells`` for the common pattern of
+    flipping a column (e.g. ``disabled = 'yes'`` across many rows of a module,
+    or ``required = 'yes'`` across all "Other, specify" follow-ups).
+    """
+    return batch_update_cells(tab, [(r, header_name, value) for r in rows])
 
 
 def append_row(tab: TabHandle, row_dict: Mapping[str, object]) -> int:
