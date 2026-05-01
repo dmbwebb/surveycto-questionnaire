@@ -216,15 +216,13 @@ def upload_form(
 
 
 def _resolve_gsheet_to_temp_xlsx(target: str) -> Path:
-    """Resolve a doc_id / .gsheet pointer / pointer path to a temp xlsx.
+    """Resolve a doc_id / .gsheet pointer / pointer path to a temp xlsx path.
 
-    Caller is responsible for cleanup (temp dir uses tempfile.mkdtemp).
-    Imported lazily so the rest of the CLI works without google-api-python-client
-    installed.
+    Lazy-imports gsheet_io so the xlsx-only path doesn't require
+    google-api-python-client. The caller registers cleanup of the parent
+    tempdir (see ``main`` — atexit hook).
     """
     import tempfile
-    # Local import — gsheet_io lives next to this script.
-    sys.path.insert(0, str(Path(__file__).parent))
     from gsheet_io import export_gsheet_to_xlsx, resolve_to_doc_id
 
     doc_id = resolve_to_doc_id(target)
@@ -313,6 +311,12 @@ def main(argv: list[str] | None = None) -> int:
                   file=sys.stderr)
             return 2
         args.form_xlsx = gsheet_temp_path
+        # Best-effort cleanup at process exit so we don't leak the temp dir
+        # whether upload succeeds, fails, or the user Ctrl-C's mid-flight.
+        import atexit
+        import shutil
+        atexit.register(shutil.rmtree, gsheet_temp_path.parent,
+                        ignore_errors=True)
         print(f"resolved gsheet {args.from_gsheet} -> {gsheet_temp_path}")
 
     if not args.form_xlsx.is_file():

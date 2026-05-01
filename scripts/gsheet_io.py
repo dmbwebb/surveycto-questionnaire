@@ -12,6 +12,7 @@ This is the canonical home of these helpers — the dev workspace at
 """
 from __future__ import annotations
 
+import functools
 import io
 import json
 import sys
@@ -20,7 +21,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-# Reuse the shared OAuth bootstrapper from the google-sheets / google-drive skills.
 sys.path.insert(0, str(Path.home() / ".claude" / ".google"))
 from google_auth import build_service, load_credentials  # noqa: E402
 
@@ -28,6 +28,11 @@ XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 GSHEET_MIME = "application/vnd.google-apps.spreadsheet"
 
 
+# Memoized to avoid re-fetching the discovery doc + reloading the token on every
+# call — both `build_service` and `load_credentials` are heavy. With dozens of
+# helpers each issuing 1-2 API calls, the discovery-doc cost dominates without
+# this cache.
+@functools.lru_cache(maxsize=1)
 def drive_service():
     creds = load_credentials()
     if creds is None:
@@ -37,6 +42,7 @@ def drive_service():
     return build_service("drive", "v3", creds)
 
 
+@functools.lru_cache(maxsize=1)
 def sheets_service():
     creds = load_credentials()
     if creds is None:

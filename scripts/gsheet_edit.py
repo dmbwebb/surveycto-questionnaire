@@ -13,11 +13,27 @@ Sheets UI. Header row is row 1; data starts at row 2.
 from __future__ import annotations
 
 import re
-import string
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 
+from openpyxl.utils import get_column_letter
+
 from gsheet_io import sheets_service
+
+# updates.updatedRange comes back like "survey!A11:D11" — capture the END row.
+# Must use [A-Z]+ (not \w+) — \w+ would greedy-eat digits and backtrack wrong.
+_APPENDED_RANGE_RE = re.compile(r"![A-Z]+\d+:[A-Z]+(\d+)$")
+
+
+def _parse_last_appended_row(append_response: dict) -> int:
+    updated_range = append_response.get("updates", {}).get("updatedRange", "")
+    m = _APPENDED_RANGE_RE.search(updated_range)
+    if not m:
+        raise RuntimeError(
+            f"Could not parse appended row from updatedRange={updated_range!r}; "
+            f"full response: {append_response!r}"
+        )
+    return int(m.group(1))
 
 
 class StaleDataError(RuntimeError):
@@ -59,36 +75,37 @@ class TabHandle:
 
 
 def _col_idx_to_letter(idx0: int) -> str:
-    """0-based column index -> A1 letters (0->A, 25->Z, 26->AA)."""
+    """0-based column index -> A1 letters (0->A, 25->Z, 26->AA).
+
+    Thin wrapper over openpyxl's 1-based ``get_column_letter`` so call sites
+    can stay 0-based (consistent with the Sheets API request schema).
+    """
     if idx0 < 0:
         raise ValueError(f"negative column index: {idx0}")
-    s = ""
-    n = idx0 + 1
-    while n > 0:
-        n, r = divmod(n - 1, 26)
-        s = string.ascii_uppercase[r] + s
-    return s
+    return get_column_letter(idx0 + 1)
 
 
 def open_tab(doc_id: str, tab_title: str) -> TabHandle:
-    """Fetch a tab's metadata + header row in two API calls; cache for reuse."""
-    svc = sheets_service()
-    md = svc.spreadsheets().get(spreadsheetId=doc_id).execute()
-    sheet_id = None
-    for s in md.get("sheets", []):
-        if s["properties"]["title"] == tab_title:
-            sheet_id = s["properties"]["sheetId"]
-            break
-    if sheet_id is None:
-        raise ValueError(f"No tab named {tab_title!r} in spreadsheet {doc_id}")
-
-    res = svc.spreadsheets().values().get(
+    """Fetch a tab's sheetId + header row in a single API round-trip."""
+    res = sheets_service().spreadsheets().get(
         spreadsheetId=doc_id,
-        range=f"'{tab_title}'!1:1",
+        ranges=[f"'{tab_title}'!1:1"],
+        includeGridData=True,
+        fields=("sheets.properties(sheetId,title),"
+                "sheets.data.rowData.values.formattedValue"),
     ).execute()
-    headers = tuple(res.get("values", [[]])[0])
-    return TabHandle(doc_id=doc_id, tab_title=tab_title,
-                     sheet_id=sheet_id, headers=headers)
+
+    for s in res.get("sheets", []):
+        props = s["properties"]
+        if props["title"] != tab_title:
+            continue
+        sheet_id = props["sheetId"]
+        rows = (s.get("data", [{}])[0] or {}).get("rowData", [])
+        first_row_cells = rows[0].get("values", []) if rows else []
+        headers = tuple(c.get("formattedValue", "") for c in first_row_cells)
+        return TabHandle(doc_id=doc_id, tab_title=tab_title,
+                         sheet_id=sheet_id, headers=headers)
+    raise ValueError(f"No tab named {tab_title!r} in spreadsheet {doc_id}")
 
 
 # ---------- Cell-level reads/writes ----------
@@ -179,25 +196,16 @@ def append_row(tab: TabHandle, row_dict: Mapping[str, object]) -> int:
         insertDataOption="INSERT_ROWS",
         body={"values": [values]},
     ).execute()
-    # updates.updatedRange comes back like "survey!A11:D11" — capture END row.
-    # Must use [A-Z]+ (not \w+) — \w+ would greedy-eat digits and backtrack.
-    updated_range = res.get("updates", {}).get("updatedRange", "")
-    m = re.search(r"![A-Z]+\d+:[A-Z]+(\d+)$", updated_range)
-    if not m:
-        raise RuntimeError(
-            f"Could not parse appended row from updatedRange={updated_range!r}; "
-            f"full response: {res!r}"
-        )
-    return int(m.group(1))
+    return _parse_last_appended_row(res)
 
 
 def insert_row_at(tab: TabHandle, position_row: int,
                   row_dict: Mapping[str, object]) -> None:
     """Insert a new row at 1-based ``position_row``, shifting everything below down.
 
-    Two-step: (1) InsertDimensionRequest opens an empty row; (2) values().update
-    fills it. Done in one batchUpdate? No — InsertDimension uses sheets.batchUpdate
-    (with sheetId) and values writes use values.update. We do them sequentially.
+    Two API calls: insertDimension (shifts rows) + values.update (fills new row).
+    Can't fold into one batchUpdate without losing USER_ENTERED parsing on the
+    new row's values — important for the rare ``=NOW()``-style formula cell.
 
     Required for inserting a question inside a `begin group`/`end group` block.
     """
@@ -205,7 +213,6 @@ def insert_row_at(tab: TabHandle, position_row: int,
         raise ValueError(f"position_row must be >= 1, got {position_row}")
 
     svc = sheets_service()
-    # Step 1: shift rows down.
     svc.spreadsheets().batchUpdate(
         spreadsheetId=tab.doc_id,
         body={
@@ -214,16 +221,15 @@ def insert_row_at(tab: TabHandle, position_row: int,
                     "range": {
                         "sheetId": tab.sheet_id,
                         "dimension": "ROWS",
-                        "startIndex": position_row - 1,  # 0-based, inclusive
-                        "endIndex": position_row,        # 0-based, exclusive
+                        "startIndex": position_row - 1,
+                        "endIndex": position_row,
                     },
-                    "inheritFromBefore": True,  # carry formatting of row above
+                    "inheritFromBefore": True,
                 },
             }],
         },
     ).execute()
 
-    # Step 2: fill the new row with values.
     values = [row_dict.get(h, "") for h in tab.headers]
     last_col_letter = _col_idx_to_letter(len(tab.headers) - 1)
     svc.spreadsheets().values().update(
@@ -423,13 +429,7 @@ def add_choice_list(
         insertDataOption="INSERT_ROWS",
         body={"values": rows_to_append},
     ).execute()
-    updated_range = res.get("updates", {}).get("updatedRange", "")
-    m = re.search(r"![A-Z]+\d+:[A-Z]+(\d+)$", updated_range)
-    if not m:
-        raise RuntimeError(
-            f"Could not parse appended row from updatedRange={updated_range!r}"
-        )
-    return int(m.group(1))
+    return _parse_last_appended_row(res)
 
 
 # ---------- Formatting (textFormat.foregroundColor) ----------
