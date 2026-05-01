@@ -37,17 +37,25 @@ When the form lives as a Google Sheet (the K2 baseline/midline/endline pattern),
 When the user (or another concurrent agent) is editing the gsheet alongside you, three things bite:
 
 - **Sheets API rate limit is 60 reads/min/user.** Per-cell `update_cell_checked` does ~2 calls per cell (one read, one write); 30+ cells in a tight loop will hit HTTP 429. Use `batch_update_cells(tab, edits)` (or the `bulk_set_column` shortcut) for bulk writes — one API call covers all rows, with built-in 429 retry. Read once via the exported xlsx (no API hit) to confirm preconditions, then batch-write.
+- **Locating rows by `(name, type)` pair: never write per-row scanners that call `get_cell` in a loop.** A naive `find_row_by_nametype` that calls `get_cell(tab, r, 'name')` and `get_cell(tab, r, 'type')` for every row in a 1700-row form makes ~3400 API calls per lookup → instantly hits 429 or just hangs for many minutes. Instead: re-export the gsheet (`gsheet_io.exported_xlsx(doc_id)`), find target rows in the local xlsx with openpyxl (zero API calls), then build a single `batch_update_cells` write. Pattern is in the `surveycto-questionnaire` skill's "Locating multiple rows by `(name, type)` pair" example.
 - **Row numbers shift under you.** If you scan via `gsheet_io.exported_xlsx(doc_id)` and then write minutes later, a concurrent insertion above your target rows will shift everything down, and your row-number-keyed writes go to the wrong rows. The cell values *do* move with the content under insert/delete, so writes you already made stay correct — but verifications using stale row numbers will look broken even when the live state is fine. For risky write batches, prefer `find_row_by_value(tab, 'name', '<field_name>')` over hard-coded row numbers, and verify by name (not row) afterward.
 - **Disabling a field requires updating its callers.** Before setting `disabled = yes`, grep the survey for `${field_name}` references in `relevance`, `constraint`, `calculation`, `label`, `choice_filter`, `repeat_count`, `required` (and the choices sheet). Either drop those refs or update the formulas — leaving them produces "field reference to non-existent field" errors at upload. Same applies to renames (already handled by `rename_variable`, but only it).
 - **Disabling a whole module needs `disabled=yes` on EVERY row, not just the `begin group`.** A group-level relevance like `0=1` hides the questions on the device but the checker still treats the rows as active and flags duplicate names if you've added replacement questions elsewhere. Use `bulk_set_column(tab, rows, 'disabled', 'yes')` over the row range. Reads via the exported xlsx skip these rows correctly once disabled.
-- **`find_row_by_value` returns the FIRST match, including disabled duplicates.** Survey forms commonly have an old disabled `pulldata` calculate at row ~150 and the active version at row ~400 with the same `name`. When you need the active row, scan the A:B range yourself with a single `values.get` call and filter by `(name, type)` together — that's also the rate-limit-friendly way to locate many anchors at once. Pattern:
+- **`find_row_by_value` returns the FIRST match, including disabled duplicates.** Survey forms commonly have an old disabled `pulldata` calculate at row ~150 and the active version at row ~400 with the same `name` AND same `type` (e.g. K2 endline mothers form has two `calculate id_exist` rows; three `note fin` rows). Filtering by `(name, type)` alone is therefore *not enough* — you also need to check `disabled`. Scan A:P (the disabled column is at index 15 in K2 forms) in a single `values.get` call and skip rows where `disabled.lower() == 'yes'`. That's also the rate-limit-friendly way to locate many anchors at once. Pattern:
   ```python
   svc = ge.sheets_service()
   res = svc.spreadsheets().values().get(
-      spreadsheetId=tab.doc_id, range=f"'{tab.tab_title}'!A1:B"
+      spreadsheetId=tab.doc_id, range=f"'{tab.tab_title}'!A1:P"
   ).execute()
   values = res.get('values', [])
-  # then iterate values to find rows by (name, type) pair
+  for i, row in enumerate(values, start=1):
+      if i == 1: continue  # header
+      typ = row[0] if len(row) > 0 else ''
+      nm  = row[1] if len(row) > 1 else ''
+      disabled = row[15] if len(row) > 15 else ''
+      if str(disabled).lower() == 'yes':
+          continue
+      # match (nm, typ) here
   ```
 - **Inserting multiple rows at the same position: insert in REVERSE order to get the final order you want.** `insert_row_at(tab, 537, X)` followed by `insert_row_at(tab, 537, Y)` ends up with `Y` at row 537 and `X` at 538, because the second insert pushes the first one down. To land `[X, Y, Z]` at row 537+, call `insert_row_at(tab, 537, Z)`, then `Y`, then `X`. (Note: `insert_row_at` returns `None`; the landed row is the `position_row` arg you passed in.)
 - **Bulk row deletion (10+ rows): use `batchUpdate` with `deleteDimension` requests, bottom-up.** `delete_row` is single-row and will rate-limit on large jobs. For multiple contiguous ranges, send one `batchUpdate` with multiple `deleteDimension` requests, ordered bottom-to-top so earlier deletions don't shift later ranges. Pattern:
@@ -61,6 +69,20 @@ When the user (or another concurrent agent) is editing the gsheet alongside you,
       }}})
   svc.spreadsheets().batchUpdate(spreadsheetId=tab.doc_id, body={"requests": reqs}).execute()
   ```
+- **Moving a contiguous block of rows: use `batchUpdate` with one `moveDimension` request.** `gsheet_edit.py` has no built-in "move rows" primitive, but the Sheets API does it atomically via `moveDimension`. Use this for module reorderings (e.g. shoving a contamination-prone module to the end of a 1500-row form) — far safer than read+insert_row_at-loop+delete_row, which is many API calls and risks partial state. Source range is 0-indexed half-open. `destinationIndex` is interpreted in the **original** (pre-move) coordinate space — it's the index *before which* the moved rows will appear, so to land moved rows just before original 1-indexed row `R`, pass `destinationIndex = R - 1`. Pattern:
+  ```python
+  svc = gio.sheets_service()
+  req = {"requests": [{"moveDimension": {
+      "source": {
+          "sheetId": tab.sheet_id, "dimension": "ROWS",
+          "startIndex": src_first - 1,  # 1-indexed → 0-indexed
+          "endIndex": src_last,          # 1-indexed inclusive → 0-indexed exclusive
+      },
+      "destinationIndex": dest_row - 1,  # before original 1-indexed row dest_row
+  }}]}
+  svc.spreadsheets().batchUpdate(spreadsheetId=tab.doc_id, body=req).execute()
+  ```
+  After the move, total row count is unchanged and cells in the moved range follow their content (so any references to fields inside the moved block remain valid). `${...}` references work by name, not by row position, so XLSForm logic is unaffected by the reorder.
 - **Dynamic choice lists referencing disabled roster fields produce 180+ "broken ref" errors even with no enabled consumer.** If a `pulldata`-style choice list (`list_hhmember`, etc.) has labels like `${hhmember1}` and the source `hhmember*` calculates are disabled, the checker flags every row in the choice list — even when the picker `select_one list_hhmember` is itself disabled. The choice list rows aren't auto-pruned. Fix: delete the dead choice-list rows outright (use the bulk-delete pattern above).
 
 ### Translation status convention (K2)
