@@ -13,3 +13,4 @@ __pycache__/
 # Local test files
 *.xlsx
 !examples/*.xlsx
+tests/fixture_ids.json
