@@ -1,0 +1,20 @@
+{
+  "_comment": "Drive doc IDs for K2 endline gsheet copies used as test fixtures. Created 2026-05-01. Master copies live in '_claude_test_fixtures/mada_gsheet_skill/' in dmbwebb's Drive.",
+  "fixtures_folder_id": "1PXsFZa1tosBb7PQ5JHNMOMs4TtNzlgfy",
+  "fixtures": {
+    "bulletin_notes": {
+      "doc_id": "1UAdnjpjQtpVPJQ4rr6FRrJw_0ASZHjFg_QToWRUE3ak",
+      "source_doc_id": "1A9XwvDYIzJvZq2u0iqh8uvc3SS470wWOGDW46c-yOYE",
+      "source_path": "KILONGA 2/endlineK2/questionnaires/bulletin_notes_survey_k2_endline.gsheet",
+      "approx_size_bytes": 143500,
+      "use_for": "fast iteration; small form (~10 survey rows)"
+    },
+    "school_survey": {
+      "doc_id": "1E_G7Bbherb18K2taZazQjEGtwB7BhgnZjchbM7ioe6A",
+      "source_doc_id": "101_3R8L-dfeE5ymhGTqAw5hB5Us7jcRySwxcSKht9xw",
+      "source_path": "KILONGA 2/endlineK2/questionnaires/school_survey_k2_endline.gsheet",
+      "approx_size_bytes": 164952,
+      "use_for": "stress test; medium form (~1328 rows) with full module structure (label:Malagasy + a_traduire columns)"
+    }
+  }
+}

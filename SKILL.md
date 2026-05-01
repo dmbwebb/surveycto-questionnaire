@@ -1,8 +1,53 @@
 ---
 name: surveycto-questionnaire
-description: 'Create, edit, validate, inspect, convert, and upload XLSForm surveys for SurveyCTO, ODK, and KoboToolbox. Use for questionnaire design, Excel .xlsx survey files, survey/choices/settings sheets, skip logic, relevance conditions, calculations, constraints, repeat groups, translations, validation errors, choice lists, and SurveyCTO CLI form deployment. Triggers: survey, questionnaire, SurveyCTO, XLSForm, ODK, KoboToolbox, survey form, baseline survey, endline survey, skip logic, relevance condition, choice list, upload form, deploy form, push form.'
+description: "Create, edit, validate, inspect, convert, and upload XLSForm surveys for SurveyCTO, ODK, or Kobo. Supports both .xlsx files and Google Sheets — for gsheet-backed forms, reads via auto-export to a temp xlsx and writes directly to the sheet via the Sheets API."
 ---
 # XLSForm Survey Design and Excel Editing
+
+## Working with Google Sheets-backed forms
+
+When the form lives as a Google Sheet (the K2 baseline/midline/endline pattern), the canonical workflow is:
+
+- **Reads** (validate, inspect, convert-to-text): export the gsheet to a local temp xlsx via `gsheet_io.exported_xlsx(doc_id)`, then run the existing `surveycto_checker.py` / `surveycto_to_txt.py` against it. The gsheet stays the source of truth; the xlsx is a transient build artifact. Drive's xlsx export materialises formulas (so `settings.version` cells with `NOW()`-based formulas come out evaluated), so no `recalc_excel.sh` step is needed.
+- **Writes** (edit a label, rename a variable, add a choice list, mark a translation as red): use `gsheet_edit.py` against the live Sheet via the Sheets API. Do not download → edit xlsx → re-upload — co-authors editing simultaneously would lose work.
+- **Upload to SurveyCTO**: use `surveycto_upload.py --from-gsheet <doc_id_or_pointer>`. It exports the gsheet to a temp xlsx and runs the normal CSRF/cookie upload pipeline. Works alongside `--update <form_id>` and `--media`.
+
+`gsheet_io.resolve_to_doc_id` accepts either a raw Drive `doc_id` or a path to a `.gsheet` pointer file (the JSON stub Drive Desktop drops on the local FS), so CLI users can pass familiar paths.
+
+### Edit primitives in `gsheet_edit.py`
+
+| Function | Purpose |
+|---|---|
+| `open_tab(doc_id, tab_title)` | Cache header layout + sheet_id for a tab |
+| `find_row_by_value(tab, header, value)` | Find row number by `name` (or any column) |
+| `get_cell` / `update_cell` | Single-cell read/write (USER_ENTERED parsing) |
+| `update_cell_checked` | Compare-and-swap: writes only if current value matches expected — best-effort guard against concurrent edits |
+| `append_row(tab, row_dict)` | Append to bottom; returns landed row |
+| `insert_row_at(tab, position, row_dict)` | Insert mid-tab, shifting rows down — preserves group structure |
+| `delete_row(tab, row)` | Remove a row (rejects header row 1) |
+| `rename_variable(tab, old, new)` | Rename in the `name` column AND every `${...}` reference in relevance/constraint/calculation/label/etc. — single-batch round-trip |
+| `add_choice_list(doc_id, list_name, choices)` | Append a choice list; auto-detects whether the choices tab uses `name` or `value` (XLSForm allows either) |
+| `set_text_color` / `get_text_color` | Foreground (text) color — for translation-status semantics |
+| `gsheet_io.get_drive_modified_time` / `get_drive_version` | Whole-file change sentinels (note: propagation can lag 30s+ — use `update_cell_checked` for tight loops) |
+
+### Translation status convention (K2)
+
+K2 forms use an explicit `a_traduire` column in the survey/choices tabs to flag rows that still need Malagasy translation. **That is the canonical mechanism for this project.** Don't add red-text-on-Malagasy as a parallel channel — `a_traduire` is enough.
+
+(The Hindi-style red-text rule documented elsewhere in this SKILL is for projects that don't have an `a_traduire` column. It still works mechanically — the `set_text_color` primitive is in place — but for K2 forms, prefer the column.)
+
+### Tests
+
+Live tests live in `tests/` and run against persistent Drive copies of K2 endline forms (in `_claude_test_fixtures/mada_gsheet_skill/` on dmbwebb's Drive). Doc IDs are pinned in `tests/fixture_ids.json`. Each destructive test makes its own ephemeral copy and trashes it on exit — fixtures themselves stay clean.
+
+```bash
+cd ~/.claude/skills/surveycto-questionnaire
+PYTHONPATH=scripts ~/.venvs/mada-gsheet-tests/bin/pytest tests/ -v -c tests/pytest.ini
+```
+
+Currently 22 passing tests (read flow + write flow + multi-tab edits + insert-at-position + concurrent-edit detection + delete + foreground color round-trip).
+
+
 
 ## Setup (one-time)
 
@@ -328,7 +373,7 @@ print(f"Questions with skip logic: {survey_df['relevance'].notna().sum()}")
 ### choices Sheet Columns
 
 - `list_name` (required) - Links to `select_one [list_name]` in survey sheet
-- `name` (required) - Choice identifier (e.g., `male`, `female`, `yes`, `no`)
+- `name` OR `value` (required) - Choice identifier (e.g., `male`, `female`, `yes`, `no`). XLSForm spec accepts either column name; some K2 forms (e.g. bulletin_notes) use `value`. The `add_choice_list` helper in `gsheet_edit.py` auto-detects which is in use.
 - `label` (required) - Display text
 - `image` (optional) - Image filename
 - `filter` (optional) - For cascading selects

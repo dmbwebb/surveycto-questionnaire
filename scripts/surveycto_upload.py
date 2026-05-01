@@ -20,6 +20,15 @@ USAGE
     # Server is required — pass --server or set $SURVEYCTO_SERVER
     python3 scripts/surveycto_upload.py form.xlsx --server your-server.surveycto.com
 
+    # NEW: upload directly from a Google Sheet (auto-export to temp xlsx first)
+    python3 scripts/surveycto_upload.py --from-gsheet <doc_id_or_pointer> \
+        --update school_survey_k2_endline
+    # `<doc_id_or_pointer>` can be:
+    #   - a Drive doc_id like 1A9XwvDYIz...
+    #   - a path to a .gsheet pointer file from Drive Desktop sync
+    #   - a path to an actual .gsheet file in My Drive — the JSON stub is read
+    #     to recover the doc_id.
+
 PREREQUISITES
     - You must be logged in to the SurveyCTO web console in Chrome
       (default profile). The script reads JSESSIONID from Chrome's cookie store.
@@ -206,6 +215,24 @@ def upload_form(
     return body
 
 
+def _resolve_gsheet_to_temp_xlsx(target: str) -> Path:
+    """Resolve a doc_id / .gsheet pointer / pointer path to a temp xlsx.
+
+    Caller is responsible for cleanup (temp dir uses tempfile.mkdtemp).
+    Imported lazily so the rest of the CLI works without google-api-python-client
+    installed.
+    """
+    import tempfile
+    # Local import — gsheet_io lives next to this script.
+    sys.path.insert(0, str(Path(__file__).parent))
+    from gsheet_io import export_gsheet_to_xlsx, resolve_to_doc_id
+
+    doc_id = resolve_to_doc_id(target)
+    tmpdir = Path(tempfile.mkdtemp(prefix="surveycto_upload_gsheet_"))
+    dest = tmpdir / f"{doc_id}.xlsx"
+    return export_gsheet_to_xlsx(doc_id, dest)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="surveycto_upload.py",
@@ -213,7 +240,15 @@ def main(argv: list[str] | None = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    p.add_argument("form_xlsx", type=Path, help="Path to the form XLSX file")
+    # form_xlsx becomes optional when --from-gsheet is supplied.
+    p.add_argument("form_xlsx", type=Path, nargs="?",
+                   help="Path to the form XLSX file (or omit and use --from-gsheet)")
+    p.add_argument(
+        "--from-gsheet", dest="from_gsheet", metavar="DOC_ID_OR_POINTER",
+        help="Upload from a Google Sheet: pass a Drive doc_id or a path to a "
+             ".gsheet pointer file. Internally exports the sheet to a temp xlsx, "
+             "then runs the normal upload pipeline.",
+    )
     p.add_argument(
         "-u", "--update",
         metavar="FORM_ID",
@@ -258,6 +293,27 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+
+    # Resolve the input form: either a local xlsx OR a gsheet (auto-export).
+    # Exactly one source must be provided.
+    if args.from_gsheet and args.form_xlsx:
+        print("error: pass form_xlsx OR --from-gsheet, not both.", file=sys.stderr)
+        return 2
+    if not args.from_gsheet and not args.form_xlsx:
+        print("error: provide form_xlsx or --from-gsheet <doc_id_or_pointer>.",
+              file=sys.stderr)
+        return 2
+
+    gsheet_temp_path: Path | None = None
+    if args.from_gsheet:
+        try:
+            gsheet_temp_path = _resolve_gsheet_to_temp_xlsx(args.from_gsheet)
+        except Exception as e:
+            print(f"error: could not export gsheet {args.from_gsheet!r}: {e}",
+                  file=sys.stderr)
+            return 2
+        args.form_xlsx = gsheet_temp_path
+        print(f"resolved gsheet {args.from_gsheet} -> {gsheet_temp_path}")
 
     if not args.form_xlsx.is_file():
         print(f"error: form xlsx not found: {args.form_xlsx}", file=sys.stderr)
