@@ -79,6 +79,16 @@ class StaleDataError(RuntimeError):
         self.actual = actual
 
 
+class UnsupportedCellCommentsError(RuntimeError):
+    """Raised when asked to create a true Google Sheets cell comment.
+
+    The public Drive comments API can create comments with developer-defined
+    anchors, but Google Workspace editors treat those anchors as unanchored.
+    The public Sheets API exposes cell notes, not cell comments. We therefore
+    fail loudly instead of creating a misleading note or file-level comment.
+    """
+
+
 @dataclass(frozen=True)
 class TabHandle:
     """Cached header layout for one tab, so repeated edits don't re-fetch headers."""
@@ -571,3 +581,85 @@ def get_text_color(tab: TabHandle, row: int, header_name: str
     except (KeyError, IndexError):
         return None
     return (c.get("red", 0.0), c.get("green", 0.0), c.get("blue", 0.0))
+
+
+# ---------- Google Sheets cell comments ----------
+
+DEFAULT_TRANSLATION_ASSIGNEE_EMAIL = "elianeralison@gmail.com"
+DEFAULT_TRANSLATION_COMMENT_TEMPLATE = "@{email} traduction \u00e0 v\u00e9rifier stp"
+
+_CELL_COMMENTS_UNSUPPORTED_MESSAGE = (
+    "True Google Sheets cell comments with @mentions cannot be created "
+    "reliably through the public Google APIs. The Drive comments API stores "
+    "developer-defined anchors, but Google Workspace editor apps treat those "
+    "comments as unanchored; the Sheets API only supports cell notes, which "
+    "do not notify mentioned users. Refusing to create a note or unanchored "
+    "comment as a substitute."
+)
+
+
+def _translation_comment_content(
+    content: str | None = None,
+    *,
+    assignee_email: str = DEFAULT_TRANSLATION_ASSIGNEE_EMAIL,
+) -> str:
+    """Return the project-default translation comment text."""
+    if content is not None:
+        if not str(content).strip():
+            raise ValueError("comment content must be nonempty")
+        return str(content)
+    email = str(assignee_email).strip()
+    if not email:
+        raise ValueError("assignee_email must be nonempty")
+    return DEFAULT_TRANSLATION_COMMENT_TEMPLATE.format(email=email)
+
+
+def add_cell_comment(
+    tab: TabHandle,
+    row: int,
+    header_name: str,
+    content: str,
+    *,
+    dedupe: bool = True,
+) -> dict:
+    """Create a true Google Sheets comment on one cell.
+
+    This intentionally raises ``UnsupportedCellCommentsError`` today. Public
+    Google APIs do not expose the same UI-backed cell comment primitive used
+    by Google Sheets for @mention threads. ``dedupe`` is accepted to preserve
+    the intended API shape once a reliable backend exists.
+    """
+    if row < 1:
+        raise ValueError(f"row must be >= 1, got {row}")
+    tab.col_idx_0(header_name)  # validate the target column exists
+    if not str(content).strip():
+        raise ValueError("comment content must be nonempty")
+    _ = dedupe
+    raise UnsupportedCellCommentsError(_CELL_COMMENTS_UNSUPPORTED_MESSAGE)
+
+
+def add_translation_comment(
+    tab: TabHandle,
+    row: int,
+    header_name: str,
+    content: str | None = None,
+    *,
+    assignee_email: str = DEFAULT_TRANSLATION_ASSIGNEE_EMAIL,
+    dedupe: bool = True,
+) -> dict:
+    """Add the project-standard translation comment to a Google Sheets cell.
+
+    Default text is ``@elianeralison@gmail.com traduction a verifier stp``
+    (with accents in the actual string).
+    See ``add_cell_comment`` for the current fail-loud behavior.
+    """
+    return add_cell_comment(
+        tab,
+        row,
+        header_name,
+        _translation_comment_content(
+            content,
+            assignee_email=assignee_email,
+        ),
+        dedupe=dedupe,
+    )

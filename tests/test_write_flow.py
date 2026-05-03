@@ -18,8 +18,12 @@ import openpyxl
 import pytest
 
 from gsheet_edit import (
+    DEFAULT_TRANSLATION_ASSIGNEE_EMAIL,
+    DEFAULT_TRANSLATION_COMMENT_TEMPLATE,
     StaleDataError,
+    UnsupportedCellCommentsError,
     add_choice_list,
+    add_translation_comment,
     append_row,
     batch_update_cells,
     bulk_set_column,
@@ -182,6 +186,49 @@ def test_set_and_read_back_red_text_color(ephemeral_fixture):
     color2 = get_text_color(tab, row, "label:Malagasy")
     if color2 is not None:
         assert all(c < 0.05 for c in color2), f"expected ~black, got {color2}"
+
+
+# ---------- Cell comments ----------
+
+@pytest.mark.live
+@pytest.mark.destructive
+def test_translation_comment_fails_loudly_without_creating_substitute(
+        ephemeral_fixture):
+    """Public Google APIs cannot create UI-backed Sheets cell comments.
+
+    The helper must fail before creating an unanchored Drive comment or a
+    Sheets note, since neither is a substitute for a cell comment with an
+    @mention notification.
+    """
+    doc_id = ephemeral_fixture("bulletin_notes")
+    tab = open_tab(doc_id, "survey")
+
+    expected_default = (
+        f"@{DEFAULT_TRANSLATION_ASSIGNEE_EMAIL} traduction \u00e0 "
+        "v\u00e9rifier stp"
+    )
+    assert (DEFAULT_TRANSLATION_COMMENT_TEMPLATE
+            .format(email=DEFAULT_TRANSLATION_ASSIGNEE_EMAIL)
+            == expected_default)
+
+    drive = drive_service()
+    before = drive.comments().list(
+        fileId=doc_id,
+        fields="comments(id)",
+        pageSize=100,
+    ).execute().get("comments", [])
+
+    with pytest.raises(UnsupportedCellCommentsError) as exc:
+        add_translation_comment(tab, 2, "label")
+
+    assert "cell comments with @mentions cannot be created" in str(exc.value)
+
+    after = drive.comments().list(
+        fileId=doc_id,
+        fields="comments(id)",
+        pageSize=100,
+    ).execute().get("comments", [])
+    assert len(after) == len(before)
 
 
 # ---------- Round-trip preserves checker validity ----------

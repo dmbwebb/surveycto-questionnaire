@@ -30,6 +30,7 @@ When the form lives as a Google Sheet (the K2 baseline/midline/endline pattern),
 | `rename_variable(tab, old, new)` | Rename in the `name` column AND every `${...}` reference in relevance/constraint/calculation/label/etc. — single-batch round-trip |
 | `add_choice_list(doc_id, list_name, choices)` | Append a choice list; auto-detects whether the choices tab uses `name` or `value` (XLSForm allows either) |
 | `set_text_color` / `get_text_color` | Foreground (text) color — for translation-status semantics |
+| `add_cell_comment` / `add_translation_comment` | Fail-loud placeholders for true Google Sheets cell comments with @mentions. Public Google APIs cannot create UI-backed cell comments reliably; do not substitute notes or unanchored Drive comments. |
 | `gsheet_io.get_drive_modified_time` / `get_drive_version` | Whole-file change sentinels (note: propagation can lag 30s+ — use `update_cell_checked` for tight loops) |
 
 ### Concurrency, rate limits, row shifts
@@ -91,6 +92,12 @@ K2 forms use an explicit `a_traduire` column in the survey/choices tabs to flag 
 
 (The Hindi-style red-text rule documented elsewhere in this SKILL is for projects that don't have an `a_traduire` column. It still works mechanically — the `set_text_color` primitive is in place — but for K2 forms, prefer the column.)
 
+### Google Sheets cell comments / @mentions
+
+True Google Sheets cell comments with @mentions are **not currently automatable through the public Google APIs**. Existing UI-created comments appear through Drive `comments().list()` as anchored comments with `htmlContent` such as `@<a href="mailto:...">...</a>`, but Google documents that developer-defined Drive comment anchors are saved while Google Workspace editor apps treat them as unanchored. The Sheets API exposes cell `note`, not cell comments, and notes do not notify tagged users.
+
+For that reason, `gsheet_edit.add_cell_comment(...)` and `add_translation_comment(...)` exist as fail-loud helpers: they validate the target shape and then raise `UnsupportedCellCommentsError` rather than creating a misleading note or file-level comment. The project default translation mention is `@elianeralison@gmail.com traduction à vérifier stp`.
+
 ### Tests
 
 Live Google Sheets tests live in `tests/` and run against persistent Drive copies listed in local-only `tests/fixture_ids.json`. Start from `tests/fixture_ids.example.json`; the real fixture file is gitignored because it contains private Drive IDs. Each destructive test makes its own ephemeral copy and trashes it on exit, so fixtures themselves stay clean.
@@ -101,7 +108,7 @@ cp tests/fixture_ids.example.json tests/fixture_ids.json  # then fill in real Dr
 PYTHONPATH=scripts ~/.venvs/mada-gsheet-tests/bin/pytest tests/ -v -c tests/pytest.ini
 ```
 
-Currently 25 passing tests (read flow + write flow + multi-tab edits + insert-at-position + concurrent-edit detection + delete + foreground color round-trip + batch writes).
+Currently 26 passing tests (read flow + write flow + multi-tab edits + insert-at-position + concurrent-edit detection + delete + foreground color round-trip + batch writes + fail-loud cell comment behavior).
 
 
 
