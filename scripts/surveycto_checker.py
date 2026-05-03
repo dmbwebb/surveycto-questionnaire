@@ -36,6 +36,10 @@ import openpyxl
 class SurveyCTOChecker:
     """Validates SurveyCTO XLSForm files for common errors."""
 
+    EXPRESSION_COLUMNS = ('relevance', 'calculation', 'constraint', 'choice_filter',
+                          'repeat_count', 'default')
+    SELF_REFERENCE_COLUMNS = ('relevance', 'calculation')
+
     def __init__(self, file_path):
         self.file_path = Path(file_path)
         self.survey_df = None
@@ -466,16 +470,12 @@ class SurveyCTOChecker:
         """
         print("\n=== Checking Expression Syntax ===")
 
-        # Columns that contain expressions
-        expression_columns = ['relevance', 'calculation', 'constraint', 'choice_filter',
-                              'repeat_count', 'default']
-
         issues = []
 
         for idx, row in self.survey_df.iterrows():
             field_name = row.get('name', f'Row {idx}')
 
-            for col in expression_columns:
+            for col in self.EXPRESSION_COLUMNS:
                 if pd.notna(row.get(col)):
                     expression = str(row[col])
                     syntax_errors = self._check_expression(expression)
@@ -558,6 +558,11 @@ class SurveyCTOChecker:
 
         return errors
 
+    @staticmethod
+    def _has_text(value):
+        """Return True when a spreadsheet cell has non-whitespace content."""
+        return pd.notna(value) and bool(str(value).strip())
+
     def check_upload_parser_blockers(self):
         """Catch parser-level issues that SurveyCTO rejects at upload time.
 
@@ -568,8 +573,6 @@ class SurveyCTOChecker:
         """
         print("\n=== Checking SurveyCTO Upload Parser Blockers ===")
 
-        expression_columns = ['relevance', 'calculation', 'constraint', 'choice_filter',
-                              'repeat_count', 'default']
         issues = []
 
         for idx, row in self.survey_df.iterrows():
@@ -578,12 +581,12 @@ class SurveyCTOChecker:
             label = row.get('label', '')
 
             has_identity = any(
-                pd.notna(v) and str(v).strip()
+                self._has_text(v)
                 for v in (field_type, field_name, label)
             )
             active_expressions = [
-                col for col in expression_columns
-                if pd.notna(row.get(col)) and str(row.get(col)).strip()
+                col for col in self.EXPRESSION_COLUMNS
+                if self._has_text(row.get(col))
             ]
             if not has_identity and active_expressions:
                 issues.append({
@@ -595,11 +598,11 @@ class SurveyCTOChecker:
                     ),
                 })
 
-            if pd.notna(field_name) and str(field_name).strip():
+            if self._has_text(field_name):
                 name = str(field_name).strip()
-                for col in ('relevance', 'calculation'):
+                for col in self.SELF_REFERENCE_COLUMNS:
                     expression = row.get(col)
-                    if pd.isna(expression) or not str(expression).strip():
+                    if not self._has_text(expression):
                         continue
                     refs = re.findall(r'\$\{([^}]+)\}', str(expression))
                     for ref in refs:
