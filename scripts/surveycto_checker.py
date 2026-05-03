@@ -462,6 +462,7 @@ class SurveyCTOChecker:
         - Balanced parentheses
         - Properly closed ${} field references
         - Balanced quotes (single and double)
+        - SurveyCTO parser-sensitive spaced comparison operators
         """
         print("\n=== Checking Expression Syntax ===")
 
@@ -551,7 +552,78 @@ class SurveyCTOChecker:
         if in_double_quote:
             errors.append('Unclosed double quote "')
 
+        # Check 4: SurveyCTO rejects split comparison operators like ". > = 0".
+        if re.search(r'(?:>|<|!)\s+=', expression):
+            errors.append("Invalid spaced comparison operator; use >=, <=, or != without spaces")
+
         return errors
+
+    def check_upload_parser_blockers(self):
+        """Catch parser-level issues that SurveyCTO rejects at upload time.
+
+        These are stricter than the local semantic checks above:
+        - Spacer rows with no type/name/label but with relevance/calculation/etc.
+        - Self-referential relevance/calculation expressions, which create XPath
+          dependency cycles in SurveyCTO.
+        """
+        print("\n=== Checking SurveyCTO Upload Parser Blockers ===")
+
+        expression_columns = ['relevance', 'calculation', 'constraint', 'choice_filter',
+                              'repeat_count', 'default']
+        issues = []
+
+        for idx, row in self.survey_df.iterrows():
+            field_type = row.get('type', '')
+            field_name = row.get('name', '')
+            label = row.get('label', '')
+
+            has_identity = any(
+                pd.notna(v) and str(v).strip()
+                for v in (field_type, field_name, label)
+            )
+            active_expressions = [
+                col for col in expression_columns
+                if pd.notna(row.get(col)) and str(row.get(col)).strip()
+            ]
+            if not has_identity and active_expressions:
+                issues.append({
+                    'row': idx + 2,
+                    'field': '(blank row)',
+                    'problem': (
+                        "Row has no type/name/label but has expression(s) in "
+                        f"{', '.join(active_expressions)}"
+                    ),
+                })
+
+            if pd.notna(field_name) and str(field_name).strip():
+                name = str(field_name).strip()
+                for col in ('relevance', 'calculation'):
+                    expression = row.get(col)
+                    if pd.isna(expression) or not str(expression).strip():
+                        continue
+                    refs = re.findall(r'\$\{([^}]+)\}', str(expression))
+                    for ref in refs:
+                        base_ref = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)', ref)
+                        if base_ref and base_ref.group(1) == name:
+                            issues.append({
+                                'row': idx + 2,
+                                'field': name,
+                                'problem': (
+                                    f"Self-reference in {col}: {str(expression)}"
+                                ),
+                            })
+
+        if issues:
+            print(f"\n❌ Found {len(issues)} SurveyCTO upload parser blocker(s):\n")
+            for issue in issues:
+                error_msg = (f"  Row {issue['row']}: '{issue['field']}'\n"
+                             f"    {issue['problem']}\n")
+                print(error_msg)
+                self.errors.append(error_msg)
+        else:
+            print("✅ No SurveyCTO upload parser blockers found")
+
+        return len(issues) == 0
 
     def check_typos(self):
         """Check for common typos in field names and labels."""
@@ -1439,6 +1511,7 @@ class SurveyCTOChecker:
         results.append(self.check_duplicate_names())
         results.append(self.check_empty_groups())
         results.append(self.check_expression_syntax())
+        results.append(self.check_upload_parser_blockers())
         results.append(self.check_field_references())
         results.append(self.check_choices_field_references())
         results.append(self.check_choice_lists())
