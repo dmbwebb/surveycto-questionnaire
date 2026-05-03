@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import openpyxl
@@ -44,6 +43,7 @@ from gsheet_io import (
     exported_xlsx,
     get_drive_modified_time,
     get_drive_version,
+    sheets_service,
 )
 
 SCRIPTS = Path(__file__).parent.parent / "scripts"
@@ -395,7 +395,7 @@ def test_insert_row_within_group_preserves_group_balance(ephemeral_fixture):
     tab = open_tab(doc_id, "survey")
 
     # Find the first 'begin group' and pick an insertion row 2 rows past it.
-    svc_grid = sheets_service_full_grid(tab)
+    svc_grid = _sheets_service_full_grid(tab)
     begin_idx = next(
         (i for i, r in enumerate(svc_grid[1:], start=2)
          if (r[tab.col_idx_0("type")] if len(r) > tab.col_idx_0("type") else "")
@@ -415,7 +415,7 @@ def test_insert_row_within_group_preserves_group_balance(ephemeral_fixture):
     })
 
     # Re-fetch the survey, count begin/end group rows.
-    svc_grid_after = sheets_service_full_grid(tab)
+    svc_grid_after = _sheets_service_full_grid(tab)
     type_col = tab.col_idx_0("type")
     types_after = [
         (r[type_col] if len(r) > type_col else "")
@@ -436,9 +436,8 @@ def test_insert_row_within_group_preserves_group_balance(ephemeral_fixture):
     )
 
 
-def sheets_service_full_grid(tab):
+def _sheets_service_full_grid(tab):
     """Helper: read the entire tab as a list-of-lists grid (header + data)."""
-    from gsheet_io import sheets_service
     svc = sheets_service()
     res = svc.spreadsheets().values().get(
         spreadsheetId=tab.doc_id,

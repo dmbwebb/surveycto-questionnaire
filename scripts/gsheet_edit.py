@@ -605,13 +605,16 @@ def _translation_comment_content(
 ) -> str:
     """Return the project-default translation comment text."""
     if content is not None:
-        if not str(content).strip():
-            raise ValueError("comment content must be nonempty")
-        return str(content)
-    email = str(assignee_email).strip()
-    if not email:
-        raise ValueError("assignee_email must be nonempty")
+        return _require_nonempty_text(content, "comment content")
+    email = _require_nonempty_text(assignee_email, "assignee_email").strip()
     return DEFAULT_TRANSLATION_COMMENT_TEMPLATE.format(email=email)
+
+
+def _require_nonempty_text(value: object, label: str) -> str:
+    text = str(value)
+    if not text.strip():
+        raise ValueError(f"{label} must be nonempty")
+    return text
 
 
 def add_cell_comment(
@@ -632,9 +635,7 @@ def add_cell_comment(
     if row < 1:
         raise ValueError(f"row must be >= 1, got {row}")
     tab.col_idx_0(header_name)  # validate the target column exists
-    if not str(content).strip():
-        raise ValueError("comment content must be nonempty")
-    _ = dedupe
+    _require_nonempty_text(content, "comment content")
     raise UnsupportedCellCommentsError(_CELL_COMMENTS_UNSUPPORTED_MESSAGE)
 
 
