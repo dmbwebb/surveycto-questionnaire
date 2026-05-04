@@ -8,7 +8,7 @@ description: "Create, edit, validate, inspect, convert, and upload XLSForm surve
 
 When the form lives as a Google Sheet (the K2 baseline/midline/endline pattern), the canonical workflow is:
 
-- **Reads** (validate, inspect, convert-to-text): export the gsheet to a local temp xlsx via `gsheet_io.exported_xlsx(doc_id)`, then run the existing `surveycto_checker.py` / `surveycto_to_txt.py` against it. The gsheet stays the source of truth; the xlsx is a transient build artifact. Drive's xlsx export materialises formulas (so `settings.version` cells with `NOW()`-based formulas come out evaluated), so no `recalc_excel.sh` step is needed.
+- **Reads** (validate, inspect, convert-to-text): export the gsheet to a local temp xlsx via `gsheet_io.exported_xlsx(doc_id)`, then run the existing `surveycto_checker.py` / `surveycto_to_txt.py` against it. **`exported_xlsx` is a context manager**, not a function returning a path — use `with gsheet_io.exported_xlsx(doc_id) as xlsx:` and pass `xlsx` (a path string) into openpyxl/checker calls inside the block. Binding the bare call (`xlsx = gsheet_io.exported_xlsx(doc_id)`) yields a `_GeneratorContextManager` and any path-style use raises `TypeError: expected str, bytes or os.PathLike object, not _GeneratorContextManager`. The gsheet stays the source of truth; the xlsx is a transient build artifact. Drive's xlsx export materialises formulas (so `settings.version` cells with `NOW()`-based formulas come out evaluated), so no `recalc_excel.sh` step is needed.
 - **Writes** (edit a label, rename a variable, add a choice list, mark a translation as red): use `gsheet_edit.py` against the live Sheet via the Sheets API. Do not download → edit xlsx → re-upload — co-authors editing simultaneously would lose work.
 - **Upload to SurveyCTO**: use `surveycto_upload.py --from-gsheet <doc_id_or_pointer>`. It exports the gsheet to a temp xlsx and runs the normal CSRF/cookie upload pipeline. Works alongside `--update <form_id>` and `--media`.
 
@@ -248,32 +248,34 @@ Output format:
 /usr/local/bin/python3 -m pip install --user browser_cookie3 requests
 ```
 
+⚠️ **Always invoke `surveycto_upload.py` with `/usr/local/bin/python3` explicitly, not bare `python3`.** On many Macs `python3` resolves to homebrew (`/opt/homebrew/bin/python3` or similar) which does NOT have `browser_cookie3` installed — you'll get `ModuleNotFoundError: No module named 'browser_cookie3'` even though the install command above succeeded. The dep install path and the invocation path must match.
+
 No password handling, no API token, no `--cookie` flag required as long as the user is logged in to Chrome. (If they aren't, fall back to `--cookie 'JSESSIONID=...; _uid=...'` or `$SURVEYCTO_COOKIE`.)
 
 ### Usage
 
 ```bash
 # Replace an existing form (most common case — pair with media files)
-python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
+/usr/local/bin/python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
     --update ai_screening_main_v1 \
     --media path/to/plugin.fieldplugin.zip \
     path/to/ai_screening_main_v1.xlsx
 
 # Upload a NEW form (appends to root group)
-python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
+/usr/local/bin/python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
     path/to/new_form.xlsx
 
 # Multiple media files
-python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
+/usr/local/bin/python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
     -u my_form -m a.zip -m b.png -m choices.csv path/to/form.xlsx
 
 # Override server for a single run (normally read from $SURVEYCTO_SERVER)
-python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
+/usr/local/bin/python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
     --server other-server.surveycto.com \
     path/to/form.xlsx
 
 # Dry run (auth + csrf check + plan, no upload)
-python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
+/usr/local/bin/python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
     --dry-run path/to/form.xlsx
 ```
 
