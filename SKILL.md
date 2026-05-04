@@ -21,7 +21,7 @@ When the form lives as a Google Sheet (the K2 baseline/midline/endline pattern),
 | `open_tab(doc_id, tab_title)` | Cache header layout + sheet_id for a tab |
 | `find_row_by_value(tab, header, value)` | Find row number by `name` (or any column) |
 | `get_cell` / `update_cell` | Single-cell read/write (USER_ENTERED parsing) |
-| `update_cell_checked(tab, row, header, expected_old, new_value)` | Compare-and-swap: writes only if current value matches expected — best-effort guard against concurrent edits. Signature: `update_cell_checked(tab, row, header, expected_old, new_value)` (all positional, no kwargs). Returns `True` if write succeeded, `False` if current value did not match expected (CAS failed). |
+| `update_cell_checked(tab, row, header, expected_old, new_value)` | Compare-and-swap: writes only if current value matches expected — best-effort guard against concurrent edits. Signature: `update_cell_checked(tab, row, header, expected_old, new_value)` (all positional, no kwargs). Returns `None` on success and raises `StaleDataError` if current value does not match expected. |
 | `batch_update_cells(tab, edits)` | Write many cells in one API call; `edits` is `[(row, header, value), ...]`. No CAS — verify preconditions via a single bulk read. Retries on 429. |
 | `bulk_set_column(tab, rows, header, value)` | One-call sugar over `batch_update_cells` for setting the same value across many rows of one column (the "disable a module" pattern). |
 | `append_row(tab, row_dict)` | Append to bottom; returns landed row |
@@ -158,6 +158,7 @@ The checker (`surveycto_checker.py`) performs these checks:
 | Duplicate names | Error | Two fields with the same name |
 | Empty groups | Error | Groups/repeats with no enabled children (all disabled) |
 | Expression syntax | Error | Unbalanced parentheses, unclosed `${}`, unclosed quotes |
+| Upload parser blockers | Error | `#ERROR!` in parsed columns, expression-only blank rows, self-references |
 | Field references | Error | `${field_name}` pointing to non-existent fields |
 | Choice list references | Error | `select_one`/`select_multiple` referencing undefined lists |
 | Choices field references | Error | `${field}` in choice labels pointing to non-existent fields |
@@ -316,6 +317,7 @@ Header: `X-Requested-With: XMLHttpRequest`. Auth: standard Java servlet `JSESSIO
 ### Common gotchas
 
 - **Version bump rule.** SurveyCTO refuses to replace a form unless `settings.version` in the new xlsx is **lexically greater** than the deployed version. The CLI passes the server's exact error message through (e.g. `you can't change the form attachments without also increasing the version number ... lexically greater than the previous one (2026040705)`). Bump the version in the `settings` sheet of the xlsx and retry. The convention used in this project is `YYYYMMDDNN` (e.g. `2026040801`). If you wrote the version as a `NOW()`-based formula, run `recalc_excel.sh` to evaluate it before uploading — SurveyCTO does not evaluate Excel formulas.
+- **`#ERROR!` in upload-sensitive columns.** Google Sheets formulas can leave `#ERROR!` in columns SurveyCTO parses (`required`, `relevance`, `calculation`, `constraint`, etc.); SurveyCTO rejects these with messages like `Invalid 'required' expression [#ERROR!]`. Clear the bad cell in the live gsheet and retry. Ignore `#ERROR!` in unnamed helper columns unless it feeds a parsed column.
 - **Session expired.** If you see `error: Authentication failed (HTTP 403)`, log into the SurveyCTO console in Chrome again (the JSESSIONID has expired) and retry.
 - **Wrong Chrome profile.** `browser_cookie3.chrome()` reads the **default** Chrome profile. If the user is logged into SurveyCTO in a non-default profile, pass cookies explicitly with `--cookie` or set `$SURVEYCTO_COOKIE`.
 - **Group ID for non-root uploads.** `--parent-group-id` defaults to `1` (root group). If the user wants the form inside a specific group, find that group's id by inspecting the SurveyCTO Design page (or just upload to root and let the user drag it).

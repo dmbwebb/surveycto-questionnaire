@@ -39,6 +39,11 @@ class SurveyCTOChecker:
     EXPRESSION_COLUMNS = ('relevance', 'calculation', 'constraint', 'choice_filter',
                           'repeat_count', 'default')
     SELF_REFERENCE_COLUMNS = ('relevance', 'calculation')
+    UPLOAD_SENSITIVE_COLUMNS = (
+        'type', 'name', 'relevance', 'calculation', 'constraint',
+        'constraint_message', 'required', 'required message',
+        'read only', 'repeat_count', 'choice_filter', 'default'
+    )
 
     def __init__(self, file_path):
         self.file_path = Path(file_path)
@@ -567,6 +572,7 @@ class SurveyCTOChecker:
         """Catch parser-level issues that SurveyCTO rejects at upload time.
 
         These are stricter than the local semantic checks above:
+        - Spreadsheet formula errors in upload-sensitive XLSForm columns.
         - Spacer rows with no type/name/label but with relevance/calculation/etc.
         - Self-referential relevance/calculation expressions, which create XPath
           dependency cycles in SurveyCTO.
@@ -579,6 +585,15 @@ class SurveyCTOChecker:
             field_type = row.get('type', '')
             field_name = row.get('name', '')
             label = row.get('label', '')
+
+            for col in self.UPLOAD_SENSITIVE_COLUMNS:
+                value = row.get(col)
+                if self._has_text(value) and '#ERROR' in str(value).upper():
+                    issues.append({
+                        'row': idx + 2,
+                        'field': str(field_name).strip() or '(blank row)',
+                        'problem': f"Spreadsheet formula error in {col}: {value}",
+                    })
 
             has_identity = any(
                 self._has_text(v)
