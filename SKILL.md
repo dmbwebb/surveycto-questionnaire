@@ -325,6 +325,10 @@ Header: `X-Requested-With: XMLHttpRequest`. Auth: standard Java servlet `JSESSIO
 - **Group ID for non-root uploads.** `--parent-group-id` defaults to `1` (root group). If the user wants the form inside a specific group, find that group's id by inspecting the SurveyCTO Design page (or just upload to root and let the user drag it).
 - **The Chrome MCP cannot do native file picker uploads** (tracked in `~/.claude/chrome-extension.md`) — that's the whole reason this CLI exists. Don't fall back to clicking the upload button via the browser extension; use this script instead.
 
+### Listing currently-attached form files (audit pattern)
+
+To check what media/data files are currently attached to a deployed form, hit `GET /forms/{form_id}/files` (auth via JSESSIONID cookie). Returns JSON; the attachments live at `deployedGroupFiles.mediaFiles` as an **object keyed by filename** (`{ "foo.csv": {...meta}, "bar.png": {...meta}, ... }`). Just read `Object.keys(...)` for the list of uploaded filenames. There's also `draftGroupFiles.mediaFiles` for the draft version. Useful for diffing referenced-in-form media (`media:image*`, `media:audio*`, `media:video*`, `image*`) against what's actually deployed. From Chrome MCP, `fetch('/forms/{form_id}/files?t=' + Date.now(), {credentials:'same-origin'})` works once the user is logged in; from Python, reuse the cookie-loading + CSRF-scrape helpers in `surveycto_upload.py`.
+
 ---
 
 Create and edit XLSForm surveys in Excel format for mobile data collection platforms (SurveyCTO, ODK, KoboToolbox).
