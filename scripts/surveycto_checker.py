@@ -472,6 +472,8 @@ class SurveyCTOChecker:
         - Properly closed ${} field references
         - Balanced quotes (single and double)
         - SurveyCTO parser-sensitive spaced comparison operators
+        - Duplicated boolean operators
+        - Malformed quoted selected() choice codes
         """
         print("\n=== Checking Expression Syntax ===")
 
@@ -560,6 +562,21 @@ class SurveyCTOChecker:
         # Check 4: SurveyCTO rejects split comparison operators like ". > = 0".
         if re.search(r'(?:>|<|!)\s+=', expression):
             errors.append("Invalid spaced comparison operator; use >=, <=, or != without spaces")
+
+        # Check 5: duplicated boolean operators such as "or  or" usually come
+        # from an accidental deleted term and SurveyCTO rejects them.
+        if re.search(r'\b(?:and|or)\b\s+\b(?:and|or)\b', expression, re.IGNORECASE):
+            errors.append("Duplicated boolean operator; remove the extra 'and'/'or'")
+
+        # Check 6: malformed selected() choice arguments with an opening quote
+        # but no closing quote before the selected() closing parenthesis, e.g.
+        # selected(${x}, '-997). The general quote-balance check misses pairs of
+        # these errors in the same expression.
+        if (re.search(r"\bselected\s*\([^)]*,\s*'[^']*\)", expression)
+                or re.search(r'\bselected\s*\([^)]*,\s*"[^"]*\)', expression)):
+            errors.append(
+                "Malformed quoted selected() choice code; close the quote before ')'"
+            )
 
         return errors
 
