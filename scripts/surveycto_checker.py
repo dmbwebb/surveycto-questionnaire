@@ -16,6 +16,7 @@ Validates XLSForm files for common errors:
 - Naming convention issues
 - select_multiple questions with 'other' option but no specify field
 - select_multiple questions with exclusive options (don't know, refuse, nothing, etc.) missing constraints
+- Impossible literal values: ${var}=X or selected(${var}, X) where X isn't in var's choice list
 - Conditional formatting rules (type-based color coding) are preserved
 - Cell formatting (red text for unverified translations) is preserved
 - Version formula in settings sheet is evaluated
@@ -1066,6 +1067,192 @@ class SurveyCTOChecker:
 
         return len(issues) == 0
 
+    def check_impossible_literal_values(self):
+        """Flag literal values compared against a select variable that aren't in the choice list.
+
+        Catches bugs like ``constraint: if(selected(${s_l4}, '997'), ...)`` when the
+        ``s_l4`` choice list actually has ``-997`` (negative) for "Ne sait pas" -- the
+        condition silently never fires. Likewise ``${var} = 5`` when ``var`` is bound to
+        a list with only ``1..4`` is dead code.
+
+        For each ``select_one X`` / ``select_multiple X`` field, this scans the row's
+        expression columns for references to ``${var}`` paired with a literal RHS (via
+        ``=`` / ``!=`` or ``selected()`` / ``count-selected()``) and errors if the
+        literal isn't a ``name``/``value`` in ``X``.
+
+        Skip cases (no error):
+        - The select's choice list is dynamic (``select_one_from_file foo.csv``,
+          ``select_one ${dynamic_list}``, etc.) -- can't validate without the CSV.
+        - The RHS is itself a ``${...}`` reference, not a literal.
+        - The literal is empty, whitespace, or ``''``.
+        - The calling row is disabled (already filtered out by ``load_form``).
+        - The select-defining row is disabled (also filtered out, so its var name
+          won't appear in the var-to-list map).
+        """
+        print("\n=== Checking Impossible Literal Values in Expressions ===")
+
+        # Step 1: build var_name -> choice_list_name map from select_one / select_multiple
+        # rows. Skip dynamic list types (select_*_from_file, ${...} list names).
+        var_to_list = {}
+        for _, row in self.survey_df.iterrows():
+            field_type = str(row.get('type', '')).strip()
+            field_name = row.get('name')
+            if pd.isna(field_name) or not str(field_name).strip():
+                continue
+            name = str(field_name).strip()
+
+            list_name = None
+            if field_type.startswith('select_one_from_file ') or \
+                    field_type.startswith('select_multiple_from_file '):
+                continue  # dynamic external CSV -- skip
+            if field_type.startswith('select_one '):
+                list_name = field_type[len('select_one '):].strip()
+            elif field_type.startswith('select_multiple '):
+                list_name = field_type[len('select_multiple '):].strip()
+            else:
+                continue
+
+            if not list_name or '${' in list_name:
+                continue  # blank or dynamic list reference
+            var_to_list[name] = list_name
+
+        # Step 2: build choice_list_name -> set of valid literal values (as strings).
+        # load_form already aliases the 'value' column to 'name' if needed.
+        list_to_values = {}
+        for _, choice_row in self.choices_df.iterrows():
+            list_name = choice_row.get('list_name')
+            value = choice_row.get('name')
+            if pd.isna(list_name) or pd.isna(value):
+                continue
+            list_name = str(list_name).strip()
+            value_str = str(value).strip()
+            if not list_name or not value_str:
+                continue
+            list_to_values.setdefault(list_name, set()).add(value_str)
+
+        # Step 3: regex patterns. The literal capture is intentionally permissive:
+        # we then verify it's a real literal (not blank, not just whitespace).
+        # Each pattern yields (var_name, literal_value) groups.
+        # Note: equality patterns require the ${var} on the LEFT side. That misses
+        # ``5 = ${var}`` but is consistent with how XLSForms are written in practice.
+        eq_quoted_re = re.compile(r"\$\{(\w+)\}\s*(?:=|!=)\s*'([^']*)'")
+        eq_double_quoted_re = re.compile(r'\$\{(\w+)\}\s*(?:=|!=)\s*"([^"]*)"')
+        eq_unquoted_re = re.compile(r"\$\{(\w+)\}\s*(?:=|!=)\s*(-?\d+(?:\.\d+)?)\b")
+        sel_quoted_re = re.compile(
+            r"(?:count-)?selected\s*\(\s*(?:\.|\$\{(\w+)\})\s*,\s*'([^']*)'\s*\)"
+        )
+        sel_double_quoted_re = re.compile(
+            r'(?:count-)?selected\s*\(\s*(?:\.|\$\{(\w+)\})\s*,\s*"([^"]*)"\s*\)'
+        )
+        sel_unquoted_re = re.compile(
+            r"(?:count-)?selected\s*\(\s*(?:\.|\$\{(\w+)\})\s*,\s*(-?\d+(?:\.\d+)?)\s*\)"
+        )
+
+        check_cols = ('relevance', 'relevant', 'constraint', 'calculation',
+                      'choice_filter', 'repeat_count', 'required', 'default')
+
+        issues = []
+
+        for idx, row in self.survey_df.iterrows():
+            field_name = row.get('name', f'Row {idx}')
+            row_var = str(field_name).strip() if pd.notna(field_name) else ''
+
+            for col in check_cols:
+                if col not in self.survey_df.columns:
+                    continue
+                value = row.get(col)
+                if pd.isna(value):
+                    continue
+                expression = str(value)
+                if not expression.strip():
+                    continue
+
+                # Collect (var_name_or_None, literal) hits from all patterns.
+                # For selected()/count-selected() with `.` as first arg, var_name is
+                # None and we substitute the current row's field name (self-reference).
+                hits = []
+                for m in eq_quoted_re.finditer(expression):
+                    hits.append((m.group(1), m.group(2)))
+                for m in eq_double_quoted_re.finditer(expression):
+                    hits.append((m.group(1), m.group(2)))
+                for m in eq_unquoted_re.finditer(expression):
+                    hits.append((m.group(1), m.group(2)))
+                for m in sel_quoted_re.finditer(expression):
+                    hits.append((m.group(1) or row_var, m.group(2)))
+                for m in sel_double_quoted_re.finditer(expression):
+                    hits.append((m.group(1) or row_var, m.group(2)))
+                for m in sel_unquoted_re.finditer(expression):
+                    hits.append((m.group(1) or row_var, m.group(2)))
+
+                for var_name, literal in hits:
+                    if not var_name:
+                        continue
+                    # Skip non-literal RHS: empty / whitespace.
+                    literal_str = literal.strip()
+                    if not literal_str:
+                        continue
+                    # Skip ${...} that snuck through (regexes don't match these, but
+                    # defensive).
+                    if literal_str.startswith('${'):
+                        continue
+                    # Only check variables that are bound to a (static) choice list.
+                    if var_name not in var_to_list:
+                        continue
+                    list_name = var_to_list[var_name]
+                    if list_name not in list_to_values:
+                        continue  # list undefined -- different check flags this
+                    valid_values = list_to_values[list_name]
+                    if literal_str in valid_values:
+                        continue  # all good
+
+                    # Also try a numeric-normalised comparison (e.g. '5' vs '5.0') to
+                    # avoid false positives.
+                    matched = False
+                    try:
+                        lit_num = float(literal_str)
+                        for v in valid_values:
+                            try:
+                                if float(v) == lit_num:
+                                    matched = True
+                                    break
+                            except (TypeError, ValueError):
+                                continue
+                    except (TypeError, ValueError):
+                        pass
+                    if matched:
+                        continue
+
+                    issues.append({
+                        'row': idx + 2,
+                        'field': field_name if pd.notna(field_name) else f'Row {idx}',
+                        'column': col,
+                        'var': var_name,
+                        'list': list_name,
+                        'literal': literal_str,
+                        'valid_values': sorted(valid_values, key=lambda s: (len(s), s)),
+                    })
+
+        if issues:
+            print(f"\n❌ Found {len(issues)} impossible literal value reference(s):\n")
+            for issue in issues:
+                valid = issue['valid_values']
+                if len(valid) > 10:
+                    valid_display = ','.join(valid[:10]) + f',... ({len(valid)} total)'
+                else:
+                    valid_display = ','.join(valid)
+                error_msg = (
+                    f"  Row {issue['row']} [{issue['field']}] — {issue['column']} "
+                    f"references impossible value '{issue['literal']}' for "
+                    f"${{{issue['var']}}} (choice list '{issue['list']}' has: "
+                    f"{valid_display})\n"
+                )
+                print(error_msg)
+                self.errors.append(error_msg)
+        else:
+            print("✅ All literal comparisons reference valid choice values")
+
+        return len(issues) == 0
+
     def check_numeric_refuse_option(self):
         """Check that numeric fields (integer/decimal) have -999 refuse option.
 
@@ -1553,6 +1740,7 @@ class SurveyCTOChecker:
         results.append(self.check_other_specify_fields())
         results.append(self.check_select_multiple_other())
         results.append(self.check_select_multiple_exclusive())
+        results.append(self.check_impossible_literal_values())
         results.append(self.check_required_fields())
         results.append(self.check_typos())
         results.append(self.check_missing_constraint_messages())

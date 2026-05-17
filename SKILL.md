@@ -86,7 +86,7 @@ When the user (or another concurrent agent) is editing the gsheet alongside you,
   svc.spreadsheets().batchUpdate(spreadsheetId=tab.doc_id, body=req).execute()
   ```
   After the move, total row count is unchanged and cells in the moved range follow their content (so any references to fields inside the moved block remain valid). `${...}` references work by name, not by row position, so XLSForm logic is unaffected by the reorder.
-- **Dynamic choice lists referencing disabled roster fields produce 180+ "broken ref" errors even with no enabled consumer.** If a `pulldata`-style choice list (`list_hhmember`, etc.) has labels like `${hhmember1}` and the source `hhmember*` calculates are disabled, the checker flags every row in the choice list — even when the picker `select_one list_hhmember` is itself disabled. The choice list rows aren't auto-pruned. Fix: delete the dead choice-list rows outright (use the bulk-delete pattern above).
+- **Dynamic choice lists referencing disabled roster fields produce 180+ "broken ref" errors even with no enabled consumer.** If a `pulldata`-style choice list (`list_hhmember`, etc.) has labels like `${hhmember1}` and the source `hhmember*` calculates are disabled, the checker flags every row in the choice list — even when the picker `select_one list_hhmember` is itself disabled. The choice list rows aren't auto-pruned. Fix: delete the dead choice-list rows outright (use the bulk-delete pattern above). **A single disabled roster can feed multiple choice lists.** AI Health pilot baseline had 5 lists (`household_members`, `companion_planning`, `household_members_hospital`, `household_members_decision`, `household_members_dm_select`) all referencing `${adult_label_1..15}` from the same disabled `adult_roster` repeat. After the first delete-and-recheck the checker still surfaced the others. Don't fix one and assume done — grep ALL cells in the choices sheet for `${<broken_ref>` patterns, find every `list_name` that hits, then bulk-delete in one pass.
 - **Missing type-based conditional formatting in a gsheet export can be repaired from a healthy peer form.** If `surveycto_checker.py` reports missing `begin group`/`text`/`integer`/etc. rules on a Google Sheet-backed form, copy only the healthy survey tab's conditional-format rules whose formulas reference `$A1` or `$P1`, rewrite each range to the target survey sheet's `sheetId`/grid size, and add them with Sheets API `addConditionalFormatRule`. Then re-export and rerun the checker; this is a maintainability fix, not a SurveyCTO logic change.
 
 ### Translation status convention (K2)
@@ -169,6 +169,7 @@ The checker (`surveycto_checker.py`) performs these checks:
 | Other specify fields | Warning | 'Other (specify)' choice without follow-up text field |
 | select_multiple other | Warning | select_multiple with 'other' but no specify field |
 | Exclusive options | Warning | select_multiple missing constraints for exclusive options (-97, -98) |
+| Impossible literal values | Error | `${var}=X` / `selected(${var}, X)` where `X` is not a valid name/value in `var`'s choice list (silent dead logic) |
 | Required fields | Warning | Questions without `required=yes` |
 | Typos | Warning | Common misspellings in field names/labels |
 | Constraint messages | Warning | Fields with constraints but no error message |
@@ -322,6 +323,7 @@ Header: `X-Requested-With: XMLHttpRequest`. Auth: standard Java servlet `JSESSIO
 ### Common gotchas
 
 - **Version bump rule.** SurveyCTO refuses to replace a form unless `settings.version` in the new xlsx is **lexically greater** than the deployed version. The CLI passes the server's exact error message through (e.g. `you can't change the form attachments without also increasing the version number ... lexically greater than the previous one (2026040705)`). Bump the version in the `settings` sheet of the xlsx and retry. The convention used in this project is `YYYYMMDDNN` (e.g. `2026040801`). If you wrote the version as a `NOW()`-based formula, run `recalc_excel.sh` to evaluate it before uploading — SurveyCTO does not evaluate Excel formulas.
+- **Field-plugin manifest version bump rule.** The same lexically-greater rule applies independently to attached field-plugin zips. SurveyCTO scans the `version` field in `manifest.json` inside the `.fieldplugin.zip` and rejects with `The version of the field plug-in "<name>" (<old>) should be greater than <old>` if it isn't bumped. Bump `manifest.json::version` (project convention `YYYY.MMDD.HHMM`, e.g. `2026.508.1130`) before rebuilding the zip — re-uploading an unchanged-version plugin under the same form fails even if the form xlsx version is fresh.
 - **`#ERROR!` in upload-sensitive columns.** Google Sheets formulas can leave `#ERROR!` in columns SurveyCTO parses (`required`, `relevance`, `calculation`, `constraint`, etc.); SurveyCTO rejects these with messages like `Invalid 'required' expression [#ERROR!]`. Clear the bad cell in the live gsheet and retry. Ignore `#ERROR!` in unnamed helper columns unless it feeds a parsed column.
 - **Session expired.** If you see `error: Authentication failed (HTTP 403)`, log into the SurveyCTO console in Chrome again (the JSESSIONID has expired) and retry.
 - **Wrong Chrome profile.** `browser_cookie3.chrome()` reads the **default** Chrome profile. If the user is logged into SurveyCTO in a non-default profile, pass cookies explicitly with `--cookie` or set `$SURVEYCTO_COOKIE`.
@@ -515,10 +517,12 @@ type            | name           | label                      | calculation
 integer         | num_children   | How many children?         |
 begin repeat    | child_roster   | Children                   |
 calculate       | child_position |                            | index()
-integer         | child_age      | Age of child ${position}   |
-text            | child_name     | Name of child ${position}  |
+integer         | child_age      | Age of child ${child_position}   |
+text            | child_name     | Name of child ${child_position}  |
 end repeat      | child_roster   |                            |
 ```
+
+**Gotcha:** XLSForm does NOT auto-provide a `${position}` variable inside repeat groups. You must define a `calculate` field with `index()` and reference it by its declared name (e.g. `${child_position}`). Using `${position}` in labels (including the `begin repeat` label like `Advisor ${position}`) fails the checker with "References non-existent field". Always use `${<your_calc_name>}`.
 
 ### Calculations
 
