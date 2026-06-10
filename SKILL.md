@@ -335,6 +335,21 @@ Header: `X-Requested-With: XMLHttpRequest`. Auth: standard Java servlet `JSESSIO
 
 To check what media/data files are currently attached to a deployed form, hit `GET /forms/{form_id}/files` (auth via JSESSIONID cookie). Returns JSON; the attachments live at `deployedGroupFiles.mediaFiles` as an **object keyed by filename** (`{ "foo.csv": {...meta}, "bar.png": {...meta}, ... }`). Just read `Object.keys(...)` for the list of uploaded filenames. There's also `draftGroupFiles.mediaFiles` for the draft version. Useful for diffing referenced-in-form media (`media:image*`, `media:audio*`, `media:video*`, `image*`) against what's actually deployed. From Chrome MCP, `fetch('/forms/{form_id}/files?t=' + Date.now(), {credentials:'same-origin'})` works once the user is logged in; from Python, reuse the cookie-loading + CSRF-scrape helpers in `surveycto_upload.py`.
 
+### Downloading the deployed form definition (verify deployed-vs-local labeling)
+
+SurveyCTO has **no API to download the original `.xlsx` source** — but the **compiled XForm XML** is downloadable via the OpenRosa endpoints, which accept **HTTP basic auth** (username + password, NOT the console JSESSIONID cookie). This is the way to confirm that a local XLSForm correctly labels submission data when the deployed version differs (e.g. a redeploy you don't have the source for):
+
+```bash
+# 1. List forms + deployed versions + download URLs
+curl -s -u "$USER:$PASS" -H "X-OpenRosa-Version: 1.0" \
+  "https://$SERVER.surveycto.com/formList"
+# 2. Download the compiled XForm XML (note: /forms/{id}/xml, NOT /form.xml — that 404s to an HTML error page)
+curl -s -u "$USER:$PASS" -H "X-OpenRosa-Version: 1.0" \
+  -o deployed.xml "https://$SERVER.surveycto.com/forms/{form_id}/xml"
+```
+
+The XML carries the deployed `version="..."` attribute, all field names (`<bind nodeset>`), and choices as `<select1>/<select>` `<item>` blocks with `<value>` + itext-referenced `<label>`. To diff field names / choice values / label text against a local xlsx: parse the XML (ElementTree), resolve `jr:itext('id')` labels via the `<itext>` English `<translation>`, and compare. Note: the compiled XForm collapses repeats and select_multiples differently from the wide data export — field-name diffs from auto-generated fields (`*_count`, `*_position`, pulldata list names) are expected; the **value/label diffs are what matter**. (Basic-auth works on `/formList` and `/forms/{id}/*`; console pages like `/forms/{id}/files` need the cookie instead.)
+
 ---
 
 Create and edit XLSForm surveys in Excel format for mobile data collection platforms (SurveyCTO, ODK, KoboToolbox).
@@ -374,6 +389,10 @@ for sheet in wb:
 
 wb.save('survey.xlsx')
 ```
+
+### Deriving a New Form from an Existing One (build-script pattern)
+
+When form B is a heavy edit of form A (e.g. a pilot variant: ~150 deletions, moved blocks, new modules), do NOT mutate a copy incrementally. Write ONE re-runnable Python build script that `shutil.copy`s the source form fresh and applies every transformation (delete-by-name bottom-up, capture+delete+insert to move blocks, insert-after-named-anchor for new rows, choice-list edits, then auto-prune unused choice lists by scanning `select_one/select_multiple` types). Each fix iteration = edit script → re-run → re-run checker. Benefits: deterministic rebuilds, reviewable diff of intent, audit fixes append as a phase-2 section, and the source form stays pristine. Worked example: `AI HEALTH/piloting/transport_pilot/questionnaires/build_transport_baseline.py` (Jan baseline → transport baseline; group split, scale-block relocation, ~90 new rows, settings/version/instance_name). Two gotchas: never hand-edit the generated xlsx (rebuild wipes it — put a note in the project CLAUDE.md); write a computed static `settings.version` string from `datetime.now()` in the script rather than the NOW() formula (openpyxl can't cache formula values, so a rebuild would otherwise upload a literal `=TEXT(...)` string).
 
 ### Editing Existing XLSForm Survey
 
