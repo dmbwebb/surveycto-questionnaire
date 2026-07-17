@@ -12,6 +12,10 @@ fi
 # Get absolute path
 ABSPATH="$(cd "$(dirname "$FILE")" && pwd)/$(basename "$FILE")"
 
+# Excel steals keyboard focus while open; concurrent typing lands in the sheet
+# and corrupts it. Warn the user audibly before grabbing focus.
+command -v say >/dev/null && say "Opening Excel briefly to recalculate a form. Please pause typing." 2>/dev/null
+
 osascript -e "
 set filePath to POSIX file \"$ABSPATH\"
 tell application \"Microsoft Excel\"

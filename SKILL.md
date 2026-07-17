@@ -330,6 +330,9 @@ Header: `X-Requested-With: XMLHttpRequest`. Auth: standard Java servlet `JSESSIO
 - **Wrong Chrome profile.** `browser_cookie3.chrome()` reads the **default** Chrome profile. If the user is logged into SurveyCTO in a non-default profile, pass cookies explicitly with `--cookie` or set `$SURVEYCTO_COOKIE`.
 - **Group ID for non-root uploads.** `--parent-group-id` defaults to `1` (root group). If the user wants the form inside a specific group, find that group's id by inspecting the SurveyCTO Design page (or just upload to root and let the user drag it).
 - **The Chrome MCP cannot do native file picker uploads** (tracked in `~/.claude/chrome-extension.md`) — that's the whole reason this CLI exists. Don't fall back to clicking the upload button via the browser extension; use this script instead.
+- **`recalc_excel.sh` steals keyboard focus** — it opens the file in Excel via osascript for ~5s; if the user is typing, their keystrokes land in whatever cell has focus and silently corrupt the sheet (observed: garbage in survey row 3 → upload rejected with `Invalid question name [el so]`). Warn the user (e.g. `say`) before running it, and after any rejected upload naming a garbage token, re-copy the xlsx from source and recalc again rather than debugging the corrupted copy.
+- **Verify a deployed attachment byte-for-byte** via its `downloadLink` from `GET /forms/{form_id}/files` → `deployedGroupFiles.mediaFiles[<name>].downloadLink` (cookie auth). Guessing URL patterns like `/files/media/<name>` 404s. For field-plugin zips, unzip in-memory and check `manifest.json` version + the substituted URL in `script.js`.
+- **Submission data via the console cookie**: `GET /api/v2/forms/data/wide/json/{form_id}?date=0` works with the JSESSIONID session (no separate API user needed) — handy for verifying a test submission's fields right after upload.
 
 ### Listing currently-attached form files (audit pattern)
 
@@ -1095,3 +1098,20 @@ When working with surveys:
 6. **Testing:** Validate after changes
 
 Always explain modifications so users understand XLSForm structure.
+
+## Server datasets: prefill, roster pickers & console automation (learned Jun 2026, transport pilot)
+
+Pattern for one form to prefill from another form's submissions (e.g. transport-day forms reading the baseline):
+
+- **Publish form → dataset:** Design tab → create server dataset → "Publish into" the source form → "Add all" → set **unique ID = the key field** (gives update-or-insert). Attach the dataset to each consuming form. There is a **~5–10 min refresh lag** before the attached CSV regenerates (+ device sync) — just-collected rows won't appear instantly.
+- **Prefill a value:** `pulldata('dataset','col','keycol',${key})` (returns `''` on no match — guard with `string-length(...) = 0`).
+- **Roster picker from a dataset, filtered:** `select_one/multiple <list>` with `appearance: search('dataset','matches','<filtercol>',${field})`. The choices sheet needs ONE placeholder row whose `value` cell = the dataset column to STORE and `label` cell = comma-separated columns to DISPLAY (e.g. `d4_name,d5b_age`). `search()` works identically on a published server dataset or a static `.csv` (source = dataset id / filename-without-.csv).
+- **Repeat over a select_multiple's picks** (ask sub-questions per selected item): `begin repeat` with `repeat_count=count-selected(${picks})`; inside, `calculate idx = index()-1`, `calculate this = selected-at(${picks}, ${idx})` (0-indexed, returns the stored value), then `pulldata('dataset','col','keycol',${this})` for per-item detail.
+- **Long-format repeat publishing** (one dataset row per repeat instance): the "Form field to identify unique records" MUST be a field INSIDE the repeat group (listed with a trailing `*`, e.g. `b_household_id*`); a non-repeat key is rejected with "must be in a repeat group". The `*` source columns publish as clean names (no asterisk) in long format. An **empty dataset (0 records) does NOT appear in `/forms/{id}/files`** — verify attachment via the dataset block's "Attached to:" line in the console instead.
+- **`choice_filter` cannot reference the reserved `value`/`name` column.** `choice_filter = value = 'x' or ...` silently filters out ALL options (empty select → blocks the form). Add a dedicated filter column to `choices` and reference it: `choice_filter = filter = 'all' or (filter = 'pm' and ${has_pm} = 1)`. The local `surveycto_checker.py` cannot validate `choice_filter`/`search()`/`pulldata()` semantics — only live test-view testing catches these.
+
+**Console automation (reverse-engineered — call via `fetch`, same-origin + cookie; bypasses the flaky iCheck UI):**
+- Attach/detach a dataset to a form: `POST /datasets/{datasetId}/attach/{formId}/{on|off}` (header `X-Requested-With: XMLHttpRequest`; 200 on success). Far more reliable than the attach checklist.
+- Upload CSV rows to a dataset: `POST /datasets/{datasetId}/upload?csrf_token=...` multipart with `dataset_file` (a CSV File/Blob), `dataset_upload_mode` ∈ `append|merge|clear`, `dataset_id`. From the browser, set the modal's `input[name=dataset_file]` via DataTransfer (a `new File([csv],name,{type:'text/csv'})` Blob) + dispatch `change`, then click the "Upload" submit — no native file picker needed.
+
+**`surveycto_upload.py` python:** `/usr/local/bin/python3` does NOT exist on this Mac. Install deps into and run with `~/.venvs/lifecoach/bin/python3` (`pip install browser_cookie3 requests`; it already has openpyxl + the google libs, and reads Chrome's default-profile cookies fine). The same venv runs the google-docs/drive/sheets/email scripts (system `python3` lacks `googleapiclient`).
