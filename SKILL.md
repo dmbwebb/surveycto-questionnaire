@@ -151,6 +151,12 @@ python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_checker.py" <path_to_xlsform.xls
 
 **Run it iteratively throughout your editing session.** After each major edit (adding questions, renaming variables, changing logic), run the checker before moving on to the next edit. This catches errors early — don't batch all edits and check only at the end. Fix errors, re-run, fix more, re-run — until you get zero errors. Warnings are informational but errors must be resolved.
 
+For encrypted XLSForms, `settings.public_key` must contain only the
+single-line base64-encoded DER payload. Do not paste the PEM header, footer,
+or line breaks into the cell. The checker rejects PEM-wrapped or malformed
+keys because SurveyCTO can deploy such a form but fail when the first
+submission is finalized.
+
 ### Checker Validations
 
 The checker (`surveycto_checker.py`) performs these checks:
@@ -180,6 +186,7 @@ The checker (`surveycto_checker.py`) performs these checks:
 | Naming conventions | Warning | camelCase, dots, spaces, uppercase in field names |
 | Conditional formatting | Error | Type-based color coding rules removed from survey sheet |
 | Cell formatting | Warning | Red text (unverified translations) removed |
+| Encryption public key | Error | PEM-wrapped, whitespace-containing, invalid-base64, or non-DER `settings.public_key` |
 | Version formula | Warning | Settings version formula not evaluated |
 
 ---

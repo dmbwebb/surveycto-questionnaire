@@ -19,6 +19,7 @@ Validates XLSForm files for common errors:
 - Impossible literal values: ${var}=X or selected(${var}, X) where X isn't in var's choice list
 - Conditional formatting rules (type-based color coding) are preserved
 - Cell formatting (red text for unverified translations) is preserved
+- Encryption public_key is a base64 DER payload, not a PEM-wrapped key
 - Version formula in settings sheet is evaluated
 
 Usage:
@@ -26,12 +27,15 @@ Usage:
     python surveycto_checker.py  # checks ai_health_pilot_baseline.xlsx by default
 """
 
-import pandas as pd
+import base64
+import binascii
 import re
 import sys
 import subprocess
 from pathlib import Path
+
 import openpyxl
+import pandas as pd
 
 
 class SurveyCTOChecker:
@@ -1622,6 +1626,52 @@ class SurveyCTOChecker:
         print("✅ Formatting check complete")
         return True
 
+    def check_public_key_format(self):
+        """Validate SurveyCTO's settings.public_key representation."""
+        print("\n=== Checking Encryption Public Key ===")
+
+        if self.settings_df is None or 'public_key' not in self.settings_df.columns:
+            print("  ℹ️  No public_key setting found")
+            return True
+
+        keys = [
+            str(value).strip()
+            for value in self.settings_df['public_key']
+            if pd.notna(value) and str(value).strip()
+        ]
+        if not keys:
+            print("  ℹ️  No public encryption key configured")
+            return True
+
+        issues = []
+        for key in keys:
+            if '-----BEGIN' in key or '-----END' in key or re.search(r'\s', key):
+                issues.append(
+                    "settings.public_key must contain only the single-line base64 "
+                    "DER payload, without PEM headers, footers, or whitespace"
+                )
+                continue
+
+            try:
+                decoded = base64.b64decode(key, validate=True)
+            except (binascii.Error, ValueError):
+                issues.append("settings.public_key is not valid base64")
+                continue
+
+            if not decoded or decoded[0] != 0x30:
+                issues.append(
+                    "settings.public_key does not decode to a DER SEQUENCE"
+                )
+
+        if issues:
+            for issue in dict.fromkeys(issues):
+                print(f"  ❌ {issue}")
+                self.errors.append(issue)
+            return False
+
+        print("✅ Encryption public_key is valid single-line base64 DER")
+        return True
+
     def check_version_formula(self):
         """Check that the version formula in settings has been evaluated.
 
@@ -1751,6 +1801,7 @@ class SurveyCTOChecker:
         results.append(self.check_naming_conventions())
         results.append(self.check_conditional_formatting())
         results.append(self.check_formatting_preserved())
+        results.append(self.check_public_key_format())
         results.append(self.check_version_formula())
 
         # Print summary
