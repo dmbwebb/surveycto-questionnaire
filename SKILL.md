@@ -348,7 +348,7 @@ To check what media/data files are currently attached to a deployed form, hit `G
 
 ### Downloading the deployed form definition (verify deployed-vs-local labeling)
 
-SurveyCTO has **no API to download the original `.xlsx` source** — but the **compiled XForm XML** is downloadable via the OpenRosa endpoints, which accept **HTTP basic auth** (username + password, NOT the console JSESSIONID cookie). This is the way to confirm that a local XLSForm correctly labels submission data when the deployed version differs (e.g. a redeploy you don't have the source for):
+SurveyCTO has **no API to download the original `.xlsx` source** — but the **console UI does keep it, including for PREVIOUS deployed versions**: Design tab → form → Download → "Form files" opens a dialog with the current form definition/attachments AND a "Previous deployed versions" list (one row per version with uploader + timestamp; each row is a direct download link for that version's original xlsx). This is the recovery path when a rebuild/reupload clobbered someone's server-side edits (used 3 Aug 2026 to recover the transport baseline's round-1 additions). Drive `.xlsx` revision history is a second recovery source when the file was edited via Drive. Via API, only the **compiled XForm XML** is downloadable through the OpenRosa endpoints, which accept **HTTP basic auth** (username + password, NOT the console JSESSIONID cookie). This is the way to confirm that a local XLSForm correctly labels submission data when the deployed version differs (e.g. a redeploy you don't have the source for):
 
 ```bash
 # 1. List forms + deployed versions + download URLs
