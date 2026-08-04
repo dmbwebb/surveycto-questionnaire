@@ -342,6 +342,15 @@ Header: `X-Requested-With: XMLHttpRequest`. Auth: standard Java servlet `JSESSIO
 - **Verify a deployed attachment byte-for-byte** via its `downloadLink` from `GET /forms/{form_id}/files` → `deployedGroupFiles.mediaFiles[<name>].downloadLink` (cookie auth). Guessing URL patterns like `/files/media/<name>` 404s. For field-plugin zips, unzip in-memory and check `manifest.json` version + the substituted URL in `script.js`.
 - **Submission data via the console cookie**: `GET /api/v2/forms/data/wide/json/{form_id}?date=0` works with the JSESSIONID session (no separate API user needed) — handy for verifying a test submission's fields right after upload.
 
+### User management via the console API (add/remove server users)
+
+The console's user-management UI is plain AJAX over the same JSESSIONID + CSRF auth as uploads (reuse `load_session` + `fetch_csrf_token` from `surveycto_upload.py`; note `surveycto_upload.py` needs an interpreter with `browser_cookie3` — on Duncan's Macs that's `~/.venvs/lifecoach/bin/python`, not system python or python3.12). Verified working (added a real user, Aug 2026):
+
+- `GET /users/get?tg=true&t=<epoch-ms>` (header `X-csrf-token`) → `{roles: [...], users: [{username, roleId}, ...]}` — lists all users and role definitions. Built-in role ids: `GLOBAL_ADMIN`, `GLOBAL_MANAGER` (forms+data+users), `GLOBAL_FORM_MANAGER` (forms+data, no user admin — the usual choice for collaborators/RAs), `GLOBAL_DATA_MANAGER`, `GLOBAL_COLLECTOR`; plus any custom roles.
+- `POST /users/add` with form data `{u: <email>, roleId: <role id>, blankPassword: "true", includePasswordInEmail: "false", password1: "", password2: ""}` (header `X-csrf-token`) — `blankPassword=true` = "Invite user to create their own password": SurveyCTO emails the invite, no password handling needed. Success response: `{"failedPasswordIndex":0,"errorMessage":null}`. Verify by re-fetching `/users/get`.
+- Also available, same auth pattern: `POST /users/role` `{u, role}`, `POST /users/delete` `{u}`, `POST /users/password` `{u, password1, password2}`.
+- The official Access Control API (`/api/v2/users`) may be **disabled by subscription** (403 "Read access to Access Control APIs is disabled") — the console endpoints above work regardless, since they're what the web UI itself calls.
+
 ### Listing currently-attached form files (audit pattern)
 
 To check what media/data files are currently attached to a deployed form, hit `GET /forms/{form_id}/files` (auth via JSESSIONID cookie). Returns JSON; the attachments live at `deployedGroupFiles.mediaFiles` as an **object keyed by filename** (`{ "foo.csv": {...meta}, "bar.png": {...meta}, ... }`). Just read `Object.keys(...)` for the list of uploaded filenames. There's also `draftGroupFiles.mediaFiles` for the draft version. Useful for diffing referenced-in-form media (`media:image*`, `media:audio*`, `media:video*`, `image*`) against what's actually deployed. From Chrome MCP, `fetch('/forms/{form_id}/files?t=' + Date.now(), {credentials:'same-origin'})` works once the user is logged in; from Python, reuse the cookie-loading + CSRF-scrape helpers in `surveycto_upload.py`.
