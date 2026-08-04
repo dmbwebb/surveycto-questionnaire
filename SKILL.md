@@ -1134,3 +1134,22 @@ Pattern for one form to prefill from another form's submissions (e.g. transport-
 - Upload CSV rows to a dataset: `POST /datasets/{datasetId}/upload?csrf_token=...` multipart with `dataset_file` (a CSV File/Blob), `dataset_upload_mode` ∈ `append|merge|clear`, `dataset_id`. From the browser, set the modal's `input[name=dataset_file]` via DataTransfer (a `new File([csv],name,{type:'text/csv'})` Blob) + dispatch `change`, then click the "Upload" submit — no native file picker needed.
 
 **SurveyCTO skill Python on this Mac:** `/usr/local/bin/python3` does NOT exist, and bare `python3` can lack `pandas`, `browser_cookie3`, or the Google libraries. Run `surveycto_checker.py`, `surveycto_to_txt.py`, and `surveycto_upload.py` with `~/.venvs/lifecoach/bin/python3`; install any missing upload deps (`browser_cookie3 requests`) into that venv. The same venv runs the google-docs/drive/sheets/email scripts.
+
+### Data API gotchas (wide-JSON endpoint, learned Aug 2026)
+
+- Pull data with `GET /api/v2/forms/data/wide/json/{form_id}?date=0` (basic
+  auth, API-enabled role). The `wide/csv` route WITHOUT a `date` parameter
+  returns 404 even for forms that exist — indistinguishable from a missing
+  form or a permission problem, so don't diagnose from the 404 alone.
+- **417 = "export still being prepared", not an error.** First-ever API pulls
+  and pulls right after new submissions 417 while the server builds the
+  export; retry after ~15s (a few attempts) or keep exports warm with a
+  periodic sync. Persistent 417 can also mean an encrypted form with no
+  publishable fields.
+- The JSON export renders `SubmissionDate` as "Aug 4, 2026 6:56:56 PM"
+  (server time, UTC on kilongajfl) — normalize before comparing to ISO dates.
+- Real (non-test) submissions can be created headlessly via OpenRosa: fetch
+  the compiled XForm (`/forms/{id}/xml`, basic auth) for the `version`
+  attribute, then POST multipart `xml_submission_file` to `/submission` with
+  an instance XML naming that id+version — returns 201. Console "Test" view
+  submissions do NOT reach the data API.
