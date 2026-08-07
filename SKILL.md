@@ -336,6 +336,7 @@ Header: `X-Requested-With: XMLHttpRequest`. Auth: standard Java servlet `JSESSIO
 - **Session expired.** If you see `error: Authentication failed (HTTP 403)`, log into the SurveyCTO console in Chrome again (the JSESSIONID has expired) and retry.
 - **Check the session EARLY in multi-step deploys.** `load_session(server)` + `GET /forms/{id}/files` is a cheap validity probe; an expired session needs the *user* to log in, so probe before long build/deploy prep and escalate immediately (say + focused login tab) rather than discovering it at upload time.
 - **Wrong Chrome profile.** `browser_cookie3.chrome()` reads the **default** Chrome profile. If the user is logged into SurveyCTO in a non-default profile, pass cookies explicitly with `--cookie` or set `$SURVEYCTO_COOKIE`.
+- **Drive `.gsheet` pointer hangs.** If `surveycto_upload.py --from-gsheet path/to/form.gsheet` stalls while reading a Google Drive Desktop stub, pass the raw doc id instead; the export path still uses the same live Sheet.
 - **Group ID for non-root uploads.** `--parent-group-id` defaults to `1` (root group). If the user wants the form inside a specific group, find that group's id by inspecting the SurveyCTO Design page (or just upload to root and let the user drag it).
 - **The Chrome MCP cannot do native file picker uploads** (tracked in `~/.claude/chrome-extension.md`) — that's the whole reason this CLI exists. Don't fall back to clicking the upload button via the browser extension; use this script instead.
 - **`recalc_excel.sh` steals keyboard focus** — it opens the file in Excel via osascript for ~5s; if the user is typing, their keystrokes land in whatever cell has focus and silently corrupt the sheet (observed: garbage in survey row 3 → upload rejected with `Invalid question name [el so]`). Warn the user (e.g. `say`) before running it, and after any rejected upload naming a garbage token, re-copy the xlsx from source and recalc again rather than debugging the corrupted copy.
@@ -353,7 +354,13 @@ The console's user-management UI is plain AJAX over the same JSESSIONID + CSRF a
 
 ### Listing currently-attached form files (audit pattern)
 
-To check what media/data files are currently attached to a deployed form, hit `GET /forms/{form_id}/files` (auth via JSESSIONID cookie). Returns JSON; the attachments live at `deployedGroupFiles.mediaFiles` as an **object keyed by filename** (`{ "foo.csv": {...meta}, "bar.png": {...meta}, ... }`). Just read `Object.keys(...)` for the list of uploaded filenames. There's also `draftGroupFiles.mediaFiles` for the draft version. Useful for diffing referenced-in-form media (`media:image*`, `media:audio*`, `media:video*`, `image*`) against what's actually deployed. From Chrome MCP, `fetch('/forms/{form_id}/files?t=' + Date.now(), {credentials:'same-origin'})` works once the user is logged in; from Python, reuse the cookie-loading + CSRF-scrape helpers in `surveycto_upload.py`.
+To check what media/data files are currently attached to a deployed form, hit `GET /forms/{form_id}/files` (auth via JSESSIONID cookie). The response includes an `xForm` object with deployment metadata worth reading before any redeploy:
+
+- `xForm.version` — The deployed form's version string (e.g. `2026040705`). Unchanged since your last deploy proves nobody else re-uploaded in between, since SurveyCTO enforces lexically-greater versions.
+- `xForm.creationDate` — Timestamp when this version was deployed.
+- `xForm.lastIncomingDataDate` — Timestamp of the last submission received. Tells you whether the form is actively collecting data, which matters for mid-round replacements (a form with recent submissions is risky to change).
+
+The attachments live at `deployedGroupFiles.mediaFiles` as an **object keyed by filename** (`{ "foo.csv": {...meta}, "bar.png": {...meta}, ... }`). Just read `Object.keys(...)` for the list of uploaded filenames. There's also `draftGroupFiles.mediaFiles` for the draft version. Useful for diffing referenced-in-form media (`media:image*`, `media:audio*`, `media:video*`, `image*`) against what's actually deployed. From Chrome MCP, `fetch('/forms/{form_id}/files?t=' + Date.now(), {credentials:'same-origin'})` works once the user is logged in; from Python, reuse the cookie-loading + CSRF-scrape helpers in `surveycto_upload.py`.
 
 ### Downloading the deployed form definition (verify deployed-vs-local labeling)
 
