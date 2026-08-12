@@ -35,3 +35,26 @@ def test_expression_checker_accepts_valid_quoted_selected_code():
     errors = _errors("not(selected(${items}, '-997')) and not(selected(${items}, '-998'))")
 
     assert not errors
+
+
+def test_expression_checker_flags_double_equals():
+    errors = _errors("${consent} == 1")
+
+    assert any("not '=='" in error for error in errors)
+
+
+def test_expression_checker_flags_unsupported_odk_functions():
+    for expr in (
+        "substring-after(${id}, '-')",
+        "starts-with(${name}, 'Dr')",
+        "contains(${label}, 'x')",
+        "substring-before(${id}, '-')",
+    ):
+        errors = _errors(expr)
+        assert any("Unsupported function" in error for error in errors), expr
+
+
+def test_expression_checker_accepts_supported_lookalike_functions():
+    errors = _errors("count-selected(${items}) >= 1 and selected-at(${items}, 0) = 'a'")
+
+    assert not errors

@@ -86,7 +86,7 @@ When the user (or another concurrent agent) is editing the gsheet alongside you,
   }}]}
   svc.spreadsheets().batchUpdate(spreadsheetId=tab.doc_id, body=req).execute()
   ```
-  After the move, total row count is unchanged and cells in the moved range follow their content (so any references to fields inside the moved block remain valid). `${...}` references work by name, not by row position, so XLSForm logic is unaffected by the reorder.
+  After the move, total row count is unchanged and cells in the moved range follow their content (so any references to fields inside the moved block remain valid). `${...}` references work by name, not by row position, so XLSForm logic is unaffected by the reorder. ⚠️ **On a deployed form with data, only reorder within the same group nesting.** SurveyCTO tracks each field by its full path including enclosing groups — moving fields INTO or OUT OF a group/repeat, renaming a group, or changing repeat enclosure between versions breaks the linkage to already-collected data (exports treat it as a different field). Whole-module moves that keep every field inside its original group are safe.
 - **Dynamic choice lists referencing disabled roster fields produce 180+ "broken ref" errors even with no enabled consumer.** If a `pulldata`-style choice list (`list_hhmember`, etc.) has labels like `${hhmember1}` and the source `hhmember*` calculates are disabled, the checker flags every row in the choice list — even when the picker `select_one list_hhmember` is itself disabled. The choice list rows aren't auto-pruned. Fix: delete the dead choice-list rows outright (use the bulk-delete pattern above). **A single disabled roster can feed multiple choice lists.** AI Health pilot baseline had 5 lists (`household_members`, `companion_planning`, `household_members_hospital`, `household_members_decision`, `household_members_dm_select`) all referencing `${adult_label_1..15}` from the same disabled `adult_roster` repeat. After the first delete-and-recheck the checker still surfaced the others. Don't fix one and assume done — grep ALL cells in the choices sheet for `${<broken_ref>` patterns, find every `list_name` that hits, then bulk-delete in one pass.
 - **Missing type-based conditional formatting in a gsheet export can be repaired from a healthy peer form.** If `surveycto_checker.py` reports missing `begin group`/`text`/`integer`/etc. rules on a Google Sheet-backed form, copy only the healthy survey tab's conditional-format rules whose formulas reference `$A1` or `$P1`, rewrite each range to the target survey sheet's `sheetId`/grid size, and add them with Sheets API `addConditionalFormatRule`. Then re-export and rerun the checker; this is a maintainability fix, not a SurveyCTO logic change.
 
@@ -168,6 +168,7 @@ The checker (`surveycto_checker.py`) performs these checks:
 | Duplicate names | Error | Two fields with the same name |
 | Empty groups | Error | Groups/repeats with no enabled children (all disabled) |
 | Expression syntax | Error | Unbalanced parentheses, unclosed `${}`, unclosed quotes |
+| ODK-isms | Error | `==` equality; unsupported functions `starts-with()`, `contains()`, `substring-before/after()` |
 | Upload parser blockers | Error | `#ERROR!` in parsed columns, expression-only blank rows, self-references |
 | Field references | Error | `${field_name}` pointing to non-existent fields |
 | Choice list references | Error | `select_one`/`select_multiple` referencing undefined lists |
@@ -385,37 +386,17 @@ Create and edit XLSForm surveys in Excel format for mobile data collection platf
 
 ### Creating New XLSForm Survey
 
-```python
-from openpyxl import Workbook
-from openpyxl.styles import Font
+Start from the bundled template — do NOT build a fresh workbook with `openpyxl.Workbook()` or `pandas.ExcelWriter`:
 
-wb = Workbook()
-
-# Create survey sheet
-survey = wb.active
-survey.title = 'survey'
-survey.append(['type', 'name', 'label', 'required', 'relevance', 'constraint', 'calculation'])
-survey.append(['text', 'respondent_name', 'What is your name?', 'yes'])
-survey.append(['integer', 'age', 'What is your age?', 'yes', '', '. >= 0 and . <= 120'])
-
-# Create choices sheet
-choices = wb.create_sheet('choices')
-choices.append(['list_name', 'name', 'label'])
-choices.append(['yes_no', '1', 'Yes'])
-choices.append(['yes_no', '0', 'No'])
-
-# Create settings sheet
-settings = wb.create_sheet('settings')
-settings.append(['form_title', 'form_id', 'version'])
-settings.append(['My Survey 2025', 'my_survey_v1', '=TEXT(YEAR(NOW())-2000+2, "00") & TEXT(MONTH(NOW()), "00") & TEXT(DAY(NOW()), "00") & TEXT(HOUR(NOW()), "00") & TEXT(MINUTE(NOW()), "00")'])
-
-# Bold headers
-for sheet in wb:
-    for cell in sheet[1]:
-        cell.font = Font(bold=True)
-
-wb.save('survey.xlsx')
+```bash
+cp "$SURVEYCTO_SKILL_DIR/assets/xlsform-template.xlsx" path/to/new_form.xlsx
 ```
+
+The template (vendored from the official SurveyCTO skill) ships with the exact SurveyCTO column headers on all three sheets, starter metadata rows (`starttime`/`endtime`/`deviceid`/`username`, `device_info`/`duration` calculates, a `caseid` row — delete `caseid` for non-case-management forms), a `yesno` choice list, `help-survey`/`help-choices`/`help-settings` reference sheets, the type-based conditional formatting that this skill's checker verifies, and a NOW()-based auto-updating `version` formula. A from-scratch workbook loses all of that and immediately fails the checker's conditional-formatting check. Then edit the copy with openpyxl as below.
+
+- The template's version formula is `=TEXT(YEAR(NOW())-2000, "00") & ...` — this project's convention adds a `+2` year offset (`YEAR(NOW())-2000+2`) to stay lexically greater than legacy versions. Fine for a brand-new form either way; apply the `+2` variant when consistency with this project's other forms matters.
+- Set `form_title`/`form_id` in settings row 2 (`default_language` is `english`).
+- When form B derives from an existing form A, the build-script pattern below (copy the project's own form, not the template) is the right move.
 
 ### Deriving a New Form from an Existing One (build-script pattern)
 
@@ -491,7 +472,7 @@ print(f"Questions with skip logic: {survey_df['relevance'].notna().sum()}")
 - `hint` - Help text below question
 - `appearance` - Display control: `minimal`, `compact`, `multiline`, `numbers`, `horizontal-compact`, `signature`
 - `read_only` - Display only: `yes`
-- `disabled` - When set to `yes`, the question is completely excluded from the survey. **Treat disabled questions as if they don't exist** - they won't appear in the form, won't collect data, and should be ignored when analyzing survey structure or adding new questions. Disabled rows are kept in the Excel file for reference but are functionally removed from the active survey.
+- `disabled` - When set to `yes`, the question is completely excluded from the survey. **Treat disabled questions as if they don't exist** - they won't appear in the form, won't collect data, and should be ignored when analyzing survey structure or adding new questions. Disabled rows are kept in the Excel file for reference but are functionally removed from the active survey. Caveat for live forms: disabling (like deleting) removes the field from the deployed form definition, so previously collected data for it stops exporting alongside new submissions; SurveyCTO's own recommendation when old data must remain exportable mid-round is `relevance = 0` (field stays defined, never shown) rather than `disabled`.
 
 ### choices Sheet Columns
 
@@ -608,18 +589,20 @@ Repeats:
 ```
 count(${roster})        - Count items
 sum(${expenses})        - Sum values
-index()                 - Position (1-indexed)
-position(..)            - Position (0-indexed)
+index()                 - Position (1-indexed) — always prefer this
+position(..)            - 0-indexed ODK-ism; can fail in a non-repeating group inside a repeat
 ```
 
 ### Multi-language Surveys
 
-Use language suffixes:
+Use single-colon language suffixes — SurveyCTO's convention, unlike ODK's double-colon `label::Language`:
 
-- `label::English`, `label::Hindi`, `label::Swahili`
-- `hint::English`, `hint::Hindi`
+- `label:Hindi`, `label:Swahili`
+- `hint:Hindi`, `constraint message:Hindi`, `required message:Hindi`
 
-Set `default_language = English` in settings sheet.
+Set `default_language = English` in settings sheet. **The default language lives in the UNSUFFIXED columns** (`label`, `hint`, ...); putting it in a suffixed column (`label:English`) and leaving the base column empty silently breaks the form — the single most common structural translation mistake.
+
+For actual translation work — adding a language, updating translations after source edits, verifying someone else's translations, glossary files, back-translation spot checks, and the preserve-verbatim rules (`${refs}`, HTML tags, choice values, expressions) — read [`references/translation.md`](references/translation.md) first.
 
 ### Randomization
 
@@ -1051,9 +1034,13 @@ Before deployment:
 
 ## Common Errors
 
-1. **Unsupported functions:** SurveyCTO doesn't support `starts-with()`, `contains()`, `substring-before()`, or `substring-after()` — even though [ODK docs](https://docs.getodk.org/form-operators-functions/) list the latter two, SurveyCTO's JavaRosa parser rejects them with "cannot handle function 'substring-after'". Use `substr(string, 0, N) = 'prefix'` and `regex(string, '.*pattern.*')` for matching, and `selected-at(string, N)` (zero-indexed, space-separated) for extraction. **When in doubt, check [SurveyCTO's expressions reference](https://docs.surveycto.com/02-designing-forms/01-core-concepts/09.expressions.html), NOT the ODK docs** — SurveyCTO's XPath function set is a strict subset of ODK's.
+1. **SurveyCTO diverges from ODK/XPath** — never copy generic ODK snippets unedited. The load-bearing divergences: equality is `=` (never `==`); division is `div` (not `/`); current repeat index is `index()` (ODK's `position(..)` can fail in a non-repeating group inside a repeat); choice labels via `choice-label(field, value)` (preferred over `jr:choice-name()`, different arg order); the skip-logic column is `relevance` (not `relevant`); `select_multiple` membership needs `selected()`, never `=`. The checker errors on `==` and the unsupported functions below. Full function tables with signatures, worked patterns, and a symptom→cause→fix pitfalls table: [`references/expressions.md`](references/expressions.md).
 
-2. **Extracting structured data from a field plug-in's output:** Use the `plug-in-metadata()` + `selected-at()` pattern. The plug-in calls `setMetaData(spaceSeparatedString)` (where any value containing spaces has its spaces replaced with `_`), and a calculate field then reads `selected-at(plug-in-metadata(${plugin_field}), N)` for the Nth value (zero-indexed). Direct JSON parsing in the form is impossible — there's no `substring-before/after`, `regex-replace`, or JSON parser.
+2. **Unsupported functions:** SurveyCTO doesn't support `starts-with()`, `contains()`, `substring-before()`, or `substring-after()` — even though [ODK docs](https://docs.getodk.org/form-operators-functions/) list the latter two, SurveyCTO's JavaRosa parser rejects them with "cannot handle function 'substring-after'". Use `substr(string, 0, N) = 'prefix'` and `regex(string, '.*pattern.*')` for matching, and `selected-at(string, N)` (zero-indexed, space-separated) for extraction. **When in doubt, check [SurveyCTO's expressions reference](https://docs.surveycto.com/02-designing-forms/01-core-concepts/09.expressions.html), NOT the ODK docs** — SurveyCTO's XPath function set is a strict subset of ODK's.
+
+3. **Integers cap at nine digits.** Longer values (phone numbers, long IDs) silently break — use `text` with `appearance: numbers` / `numbers_phone` instead, which shows the numeric keyboard but stores text (also preserves leading zeros).
+
+4. **Extracting structured data from a field plug-in's output:** Use the `plug-in-metadata()` + `selected-at()` pattern. The plug-in calls `setMetaData(spaceSeparatedString)` (where any value containing spaces has its spaces replaced with `_`), and a calculate field then reads `selected-at(plug-in-metadata(${plugin_field}), N)` for the Nth value (zero-indexed). Direct JSON parsing in the form is impossible — there's no `substring-before/after`, `regex-replace`, or JSON parser.
 1. **Duplicate names:** Each question needs unique name
 2. **Missing list_name:** select questions must reference existing choice list
 3. **Syntax errors:** Check parentheses, quotes, operators in logic
@@ -1062,12 +1049,41 @@ Before deployment:
 6. **Invalid characters:** Names must be letters, numbers, underscores only
 7. **Mismatched tags:** Every `begin group` needs `end group`
 
+## Field Plug-ins
+
+When authoring or debugging a `.fieldplugin.zip`, read [`references/field-plugins.md`](references/field-plugins.md) — the full form API (`fieldProperties`, provided/called JS functions, Mustache `{{{LABEL}}}`/`{{{HINT}}}` triple-brace rules, `{{PLUGINDIR}}` attachment paths), packaging rules, and platform caveats (intents/phone APIs are Android-only). Quick hits:
+
+- Plug-ins only work on `text`/`integer`/`decimal`/`select_one`/`select_multiple`. The `custom-<name>` appearance token is the **zip filename stem** (`myplugin.fieldplugin.zip` → `custom-myplugin`), NOT `manifest.name`. All files at the zip root — subdirectories get flattened on upload and duplicate basenames error.
+- Start from SurveyCTO's `baseline-*` GitHub repos (`baseline-text`/`-integer`/`-decimal`/`-select_one`/`-select_multiple`) or the [catalog](https://support.surveycto.com/hc/en-us/articles/360045235134-Field-plug-in-catalog); `assets/field-plugin-template/` is a minimal offline text-only skeleton (see the reference for the baseline behaviors it omits). **Read an existing plug-in's README before building form-side conversion layers** — it often already accepts your raw value.
+- Local fast loop: open `assets/field-plugin-test-harness/preview.html` in a browser (folder mode or paste-in-textareas mode) — it renders the four core files with the host JS bridge stubbed, real Mustache, platform-class toggles, and a mirrored console. `node assets/field-plugin-test-harness/validate.mjs <plugin-dir-or-zip>` statically checks manifest/filenames/`clearAnswer`/`setAnswer`. Both zero-dependency.
+- Final validation: the in-product plug-in console — form designer → **Test** → navigate to the plug-in field → icon on the left edge. It live-edits HTML/CSS/JS against real form context; edits are session-scoped, so copy fixes back to source and re-upload with a bumped `manifest.version` (see version-bump gotcha in the upload section).
+- `setAnswer()` for `select_multiple` takes a **space**-separated value list. Read parameters with `getPluginParameter('key')`, not the order-sensitive `PARAMETERS` array. Restore UI state from `fieldProperties.CURRENT_ANSWER` on load; always define `clearAnswer()`.
+- Plug-in metadata (`setMetaData`) is encrypted only when both the form AND the field are encrypted, and never when the field is `publishable` — treat it as response data; no secrets or PII beyond what the field itself would hold.
+
+## Converting Forms from Other Platforms
+
+Converting a Kobo/ODK XLSForm, CommCare XForms XML, or Qualtrics `.qsf` export into a SurveyCTO form: read [`references/form-conversion.md`](references/form-conversion.md) first (workflow contract: read source with your own tooling, plan the full mapping, convert onto a template copy, write a conversion report next to the output), then the platform reference (`form-conversion-kobo.md`, `-odk.md`, `-commcare.md`, `-qualtrics.md`). Highest-value rules: Kobo `begin_kobomatrix`/`kobo--*` tokens are rejected outright (expand matrices into `field-list` groups); ODK forms sometimes put the default language only in `label::English` leaving `label` empty, which silently breaks the form.
+
 ## Resources
 
 - **XLSForm specification:** https://xlsform.org
 - **SurveyCTO documentation:** https://docs.surveycto.com
-- **ODK documentation:** https://docs.getodk.org
+- **ODK documentation:** https://docs.getodk.org — CAUTION: SurveyCTO's function set diverges (see Common Errors above); check SurveyCTO's own expressions reference first
 - **XLSForm validation:** https://getodk.org/xlsform/
+
+### Bundled reference library
+
+`references/` vendors the official SurveyCTO agent skill's reference docs (Apache-2.0; provenance and refresh recipe in [`references/README.md`](references/README.md)). Read on demand:
+
+- [`references/xlsform.md`](references/xlsform.md) — exact column spellings (`constraint message` with a space, `choice_filter` with an underscore), ALL field types incl. SurveyCTO-specific ones (`enumerator`, `text audit`, `audio audit`, `speed violations *`, `sensor_*`, `calculate_here`, `comments`), the full appearance catalog, settings columns, choices ordering rules, template anatomy.
+- [`references/expressions.md`](references/expressions.md) — full function tables with signatures, SurveyCTO-vs-ODK divergence table, worked patterns (age-from-DOB, search(), randomization), pitfalls table, debugging checklist.
+- [`references/translation.md`](references/translation.md) — translation workflows (see Multi-language Surveys above).
+- [`references/field-plugins.md`](references/field-plugins.md) — plug-in form API, manifest, packaging, testing (see Field Plug-ins above).
+- [`references/datasets-xml.md`](references/datasets-xml.md) + [`references/dataset-validation.md`](references/dataset-validation.md) — dataset definition XML (see the server-datasets section).
+- [`references/form-conversion.md`](references/form-conversion.md) + platform variants — form conversion (see above).
+- [`references/data-explorer.md`](references/data-explorer.md) — Data Explorer monitoring-workbook definitions (rarely needed; we do monitoring in R).
+
+SurveyCTO also runs a public no-auth MCP server (`https://assistant-be.surveycto.net/mcp`; tool docs in [`references/mcp.md`](references/mcp.md)). Its `kb_search` tool searches docs./support./www.surveycto.com — a good fallback when the local references don't answer a product-behavior question (plain WebFetch of docs.surveycto.com also works). Its XLSForm session-editing tools are NOT part of this skill's workflow: the gsheet/checker/upload pipeline above is strictly more capable for our forms, and uploading questionnaires to SurveyCTO's assistant backend is unnecessary exposure.
 
 ## Enumerator Instructions
 
@@ -1136,6 +1152,8 @@ Pattern for one form to prefill from another form's submissions (e.g. transport-
 - **Flatten repeat-group answers into one string** (e.g. to pass to a field plug-in parameter, which cannot reference repeat fields directly): per-instance `calculate flat = concat(field1, ' [', field2, ']')` inside the repeat, then outside it `calculate all = join(' || ', ${flat})` — SurveyCTO supports `join(separator, repeatedfield)`. Pick a separator that cannot appear in enumerator-typed text. A `field-list`-appearance group inside each repeat instance puts that instance's fields on one screen (worked example: AI Health transport baseline medications/documents module, Aug 2026).
 - **Long-format repeat publishing** (one dataset row per repeat instance): the "Form field to identify unique records" MUST be a field INSIDE the repeat group (listed with a trailing `*`, e.g. `b_household_id*`); a non-repeat key is rejected with "must be in a repeat group". The `*` source columns publish as clean names (no asterisk) in long format. An **empty dataset (0 records) does NOT appear in `/forms/{id}/files`** — verify attachment via the dataset block's "Attached to:" line in the console instead.
 - **`choice_filter` cannot reference the reserved `value`/`name` column.** `choice_filter = value = 'x' or ...` silently filters out ALL options (empty select → blocks the form). Add a dedicated filter column to `choices` and reference it: `choice_filter = filter = 'all' or (filter = 'pm' and ${has_pm} = 1)`. The local `surveycto_checker.py` cannot validate `choice_filter`/`search()`/`pulldata()` semantics — only live test-view testing catches these.
+
+**Dataset definitions as XML files:** a server dataset's full definition (columns, form attachments, publishing rules, case-management options) can be authored as an XML file and created via console → Design → "Upload dataset definition" — a reviewable, diffable alternative to clicking through the dataset builder. Before authoring one, read [`references/datasets-xml.md`](references/datasets-xml.md) (server-source-derived — more accurate than the public support article: strict element ordering in `<definition>` and `<dataLink>`, always emit `<formLinks/>`/`<dataLinks/>` even when empty, the wide-vs-long `*`-suffix rules where a wrong suffix silently publishes nothing). Then validate before uploading: `~/.venvs/lifecoach/bin/python3 "$SURVEYCTO_SKILL_DIR/assets/dataset-validation/validate_dataset.py" dataset.xml --form form.xlsx --json` ([`references/dataset-validation.md`](references/dataset-validation.md)). ⚠️ *Editing* an existing dataset via XML is destructive (download data → delete dataset → re-upload definition → re-upload CSV in Append mode) — mid-survey, prefer the console attach/CSV endpoints below.
 
 **Console automation (reverse-engineered — call via `fetch`, same-origin + cookie; bypasses the flaky iCheck UI):**
 - List datasets + full publish configs: `GET /console/datasets/get?t=<epoch-ms>` (header `X-csrf-token`) → array of `{id, title, status, uniqueRecordField, outgoingFormIds, dataLinkSummaries:[{linkType:"INCOMING", linkObjectId:<form_id>, joiningField, fieldMap:[...]}]}` — the ground truth for "which columns actually publish" (diff it against what a consuming form pulls; a missed column fails silently as empty string).

@@ -479,6 +479,8 @@ class SurveyCTOChecker:
         - SurveyCTO parser-sensitive spaced comparison operators
         - Duplicated boolean operators
         - Malformed quoted selected() choice codes
+        - ODK-isms SurveyCTO rejects: '==' equality, starts-with()/contains()/
+          substring-before()/substring-after()
         """
         print("\n=== Checking Expression Syntax ===")
 
@@ -582,6 +584,21 @@ class SurveyCTOChecker:
             errors.append(
                 "Malformed quoted selected() choice code; close the quote before ')'"
             )
+
+        # Check 7: '==' is generic ODK/JavaScript equality; SurveyCTO's
+        # comparison operator is '=' and the parser rejects '=='.
+        if '==' in expression:
+            errors.append("SurveyCTO uses '=' for equality, not '=='")
+
+        # Check 8: XPath string functions SurveyCTO's JavaRosa parser rejects
+        # even though ODK docs list them. Use substr(string, 0, N) = 'prefix',
+        # regex(string, '.*pattern.*'), or selected-at() instead.
+        for fn in ('starts-with', 'contains', 'substring-before', 'substring-after'):
+            if re.search(rf'(?<![\w-]){fn}\s*\(', expression):
+                errors.append(
+                    f"Unsupported function '{fn}()' - SurveyCTO rejects it; "
+                    "use substr()/regex()/selected-at() instead"
+                )
 
         return errors
 
