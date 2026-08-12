@@ -1188,3 +1188,20 @@ Pattern for one form to prefill from another form's submissions (e.g. transport-
   attribute, then POST multipart `xml_submission_file` to `/submission` with
   an instance XML naming that id+version — returns 201. Console "Test" view
   submissions do NOT reach the data API.
+- **417 "Please wait N seconds": full-history pulls (`?date=0`) are
+  rate-limited per form (~15 min window).** Every early retry collides with
+  the window again, so a tight retry loop (or several agents polling the same
+  form) keeps the export perpetually "preparing". Stop touching the endpoint
+  for the full stated wait; a scheduled sync will land it on a later run.
+  Redeploying a form invalidates the export cache and restarts the cycle.
+- **Deleting specific submissions:** Monitor tab → the form's "Purge form
+  data" → "Purge specific submissions" → paste the `KEY` value(s)
+  (comma-separated). "Purge by date" is the other, dangerous branch — never
+  use it for single-record cleanup. Get the KEY from the console's "Look up
+  by key" view or your own import records.
+- **Anonymous web-form access is per form:** Collect tab → *Web data
+  collection* section → the form's **Settings** ("Allow anonymous form
+  access" toggle + Save); each row shows "Anonymous access: Yes/No". A form
+  without it serves "This form is private" at its `/collect/` URL. When
+  driving this UI programmatically, Bootstrap moves `title` into
+  `data-original-title` after tooltip init — match both attributes.
