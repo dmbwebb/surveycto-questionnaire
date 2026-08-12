@@ -40,18 +40,18 @@ def test_expression_checker_accepts_valid_quoted_selected_code():
 def test_expression_checker_flags_double_equals():
     errors = _errors("${consent} == 1")
 
-    assert any("not '=='" in error for error in errors)
+    assert any("SurveyCTO uses '=' for equality" in error for error in errors)
 
 
 def test_expression_checker_flags_unsupported_odk_functions():
-    for expr in (
-        "substring-after(${id}, '-')",
+    for expression in (
         "starts-with(${name}, 'Dr')",
         "contains(${label}, 'x')",
         "substring-before(${id}, '-')",
+        "substring-after(${id}, '-')",
     ):
-        errors = _errors(expr)
-        assert any("Unsupported function" in error for error in errors), expr
+        errors = _errors(expression)
+        assert any("Unsupported function" in error for error in errors), expression
 
 
 def test_expression_checker_accepts_supported_lookalike_functions():

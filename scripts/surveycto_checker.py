@@ -44,6 +44,9 @@ class SurveyCTOChecker:
     EXPRESSION_COLUMNS = ('relevance', 'calculation', 'constraint', 'choice_filter',
                           'repeat_count', 'default')
     SELF_REFERENCE_COLUMNS = ('relevance', 'calculation')
+    # XPath string functions the ODK docs list but SurveyCTO's JavaRosa parser rejects.
+    UNSUPPORTED_ODK_FUNCTIONS = ('starts-with', 'contains',
+                                 'substring-before', 'substring-after')
     UPLOAD_SENSITIVE_COLUMNS = (
         'type', 'name', 'relevance', 'calculation', 'constraint',
         'constraint_message', 'required', 'required message',
@@ -590,13 +593,14 @@ class SurveyCTOChecker:
         if '==' in expression:
             errors.append("SurveyCTO uses '=' for equality, not '=='")
 
-        # Check 8: XPath string functions SurveyCTO's JavaRosa parser rejects
-        # even though ODK docs list them. Use substr(string, 0, N) = 'prefix',
-        # regex(string, '.*pattern.*'), or selected-at() instead.
-        for fn in ('starts-with', 'contains', 'substring-before', 'substring-after'):
-            if re.search(rf'(?<![\w-]){fn}\s*\(', expression):
+        # Check 8: unsupported ODK string functions. The lookbehind keeps
+        # hyphenated lookalikes such as count-selected() from matching.
+        # Use substr(string, 0, N) = 'prefix', regex(string, '.*pattern.*'),
+        # or selected-at() instead.
+        for function_name in self.UNSUPPORTED_ODK_FUNCTIONS:
+            if re.search(rf'(?<![\w-]){function_name}\s*\(', expression):
                 errors.append(
-                    f"Unsupported function '{fn}()' - SurveyCTO rejects it; "
+                    f"Unsupported function '{function_name}()' - SurveyCTO rejects it; "
                     "use substr()/regex()/selected-at() instead"
                 )
 
