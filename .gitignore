@@ -14,3 +14,4 @@ __pycache__/
 *.xlsx
 !examples/*.xlsx
 tests/fixture_ids.json
+!assets/xlsform-template.xlsx
