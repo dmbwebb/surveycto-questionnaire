@@ -112,7 +112,9 @@ cp tests/fixture_ids.example.json tests/fixture_ids.json  # then fill in real Dr
 PYTHONPATH=scripts ~/.venvs/mada-gsheet-tests/bin/pytest tests/ -v -c tests/pytest.ini
 ```
 
-Currently 26 passing tests (read flow + write flow + multi-tab edits + insert-at-position + concurrent-edit detection + delete + foreground color round-trip + batch writes + fail-loud cell comment behavior).
+The `mada-gsheet-tests` venv exists only on some Macs; where it's missing, `PYTHONPATH=scripts ~/.venvs/lifecoach/bin/python3 -m pytest` works (has pytest + pandas + openpyxl).
+
+The live-gsheet suite covers read flow, write flow, multi-tab edits, insert-at-position, concurrent-edit detection, delete, foreground color round-trip, batch writes, and fail-loud cell comment behavior. The `tests/test_checker_*.py` files (expression syntax incl. ODK-isms, impossible literals, public key) are offline — they need no fixtures and run on any Mac.
 
 
 
@@ -150,6 +152,8 @@ python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_checker.py" <path_to_xlsform.xls
 - And more
 
 **Run it iteratively throughout your editing session.** After each major edit (adding questions, renaming variables, changing logic), run the checker before moving on to the next edit. This catches errors early — don't batch all edits and check only at the end. Fix errors, re-run, fix more, re-run — until you get zero errors. Warnings are informational but errors must be resolved.
+
+Note: when `settings.version` holds an unevaluated formula (no cached value — e.g. any xlsx freshly saved by openpyxl), the checker auto-launches Excel via `recalc_excel.sh` to evaluate it, which steals keyboard focus (see upload gotchas). To check a form without triggering Excel, run the checker on a scratch copy whose version cell is overwritten with a static string.
 
 For encrypted XLSForms, `settings.public_key` must contain only the
 single-line base64-encoded DER payload. Do not paste the PEM header, footer,
