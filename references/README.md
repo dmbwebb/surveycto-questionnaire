@@ -11,7 +11,10 @@ the official SurveyCTO agent skill:
 - License: Apache-2.0 — see `LICENSE-official-surveycto-skill.txt` in this directory
 
 To refresh: clone the repo, re-copy `references/*.md` and the `assets/` subtrees listed above,
-and update the version line here. Cross-links between these files (and `../assets/...` links)
+and update the version line here. Watch the repo's `.gitignore`: it ignores `*.xlsx`, so any
+new xlsx asset needs its own `!`-exception (assets/xlsform-template.xlsx already has one —
+its absence from a commit is silent otherwise; bit us 2026-08-12) — after committing, confirm
+with `git ls-files assets/`. Cross-links between these files (and `../assets/...` links)
 assume the official layout, so keep filenames and the flat `references/` + root `assets/`
 structure intact. `mcp.md` refers to "SKILL.md" meaning the *official* skill's SKILL.md, not
 ours; only its tool/endpoint documentation matters here.
