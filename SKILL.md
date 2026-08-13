@@ -369,7 +369,7 @@ The attachments live at `deployedGroupFiles.mediaFiles` as an **object keyed by 
 
 ### Downloading the deployed form definition (verify deployed-vs-local labeling)
 
-SurveyCTO has **no API to download the original `.xlsx` source** — but the **console UI does keep it, including for PREVIOUS deployed versions**: Design tab → form → Download → "Form files" opens a dialog with the current form definition/attachments AND a "Previous deployed versions" list (one row per version with uploader + timestamp; each row is a direct download link for that version's original xlsx). This is the recovery path when a rebuild/reupload clobbered someone's server-side edits (used 3 Aug 2026 to recover the transport baseline's round-1 additions). Drive `.xlsx` revision history is a second recovery source when the file was edited via Drive. Via API, only the **compiled XForm XML** is downloadable through the OpenRosa endpoints, which accept **HTTP basic auth** (username + password, NOT the console JSESSIONID cookie). This is the way to confirm that a local XLSForm correctly labels submission data when the deployed version differs (e.g. a redeploy you don't have the source for):
+SurveyCTO has **no API to download the original `.xlsx` source** — but the **console UI does keep it, including for PREVIOUS deployed versions**: Design tab → form → Download → "Form files" opens a dialog with the current form definition/attachments AND a "Previous deployed versions" list (one row per version with uploader + timestamp; each row is a direct download link for that version's original xlsx). This is the recovery path when a rebuild/reupload clobbered someone's server-side edits (used 3 Aug 2026 to recover the transport baseline's round-1 additions). Drive `.xlsx` revision history is a second recovery source when the file was edited via Drive. Via API, only the **compiled XForm XML** is downloadable. `GET /forms/{id}/xml` accepts either OpenRosa HTTP basic auth or the authenticated console `JSESSIONID` session returned by `load_session(server)`. This is the way to confirm that a local XLSForm correctly labels submission data when the deployed version differs (e.g. a redeploy you don't have the source for):
 
 ```bash
 # 1. List forms + deployed versions + download URLs
@@ -380,7 +380,7 @@ curl -s -u "$USER:$PASS" -H "X-OpenRosa-Version: 1.0" \
   -o deployed.xml "https://$SERVER.surveycto.com/forms/{form_id}/xml"
 ```
 
-The XML carries the deployed `version="..."` attribute on the form's instance-root element (for example, `<my_form id="my_form" version="...">`), not on the outer `<h:html>` element. It also carries all field names (`<bind nodeset>`) and choices as `<select1>/<select>` `<item>` blocks with `<value>` + itext-referenced `<label>`. To diff field names / choice values / label text against a local xlsx: parse the XML (ElementTree), resolve `jr:itext('id')` labels via the `<itext>` English `<translation>`, and compare. Note: the compiled XForm collapses repeats and select_multiples differently from the wide data export — field-name diffs from auto-generated fields (`*_count`, `*_position`, pulldata list names) are expected; the **value/label diffs are what matter**. (Basic-auth works on `/formList` and `/forms/{id}/*`; console pages like `/forms/{id}/files` need the cookie instead.)
+The XML carries the deployed `version="..."` attribute on the form's instance-root element (for example, `<my_form id="my_form" version="...">`), not on the outer `<h:html>` element. It also carries all field names (`<bind nodeset>`) and choices as `<select1>/<select>` `<item>` blocks with `<value>` + itext-referenced `<label>`. To diff field names / choice values / label text against a local xlsx: parse the XML (ElementTree), resolve `jr:itext('id')` labels via the `<itext>` English `<translation>`, and compare. Note: the compiled XForm collapses repeats and select_multiples differently from the wide data export — field-name diffs from auto-generated fields (`*_count`, `*_position`, pulldata list names) are expected; the **value/label diffs are what matter**. (Basic auth works on `/formList` and `/forms/{id}/*`; the console cookie works on `/forms/{id}/xml` and is required for console pages such as `/forms/{id}/files`.)
 
 ---
 
@@ -1184,7 +1184,7 @@ Pattern for one form to prefill from another form's submissions (e.g. transport-
 - The JSON export renders `SubmissionDate` as "Aug 4, 2026 6:56:56 PM"
   (server time, UTC on kilongajfl) — normalize before comparing to ISO dates.
 - Real (non-test) submissions can be created headlessly via OpenRosa: fetch
-  the compiled XForm (`/forms/{id}/xml`, basic auth) for the `version`
+  the compiled XForm (`/forms/{id}/xml`, console cookie or basic auth) for the `version`
   attribute, then POST multipart `xml_submission_file` to `/submission` with
   an instance XML naming that id+version — returns 201. Console "Test" view
   submissions do NOT reach the data API.
