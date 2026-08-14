@@ -96,7 +96,8 @@ python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
 
 The setup command immediately verifies the login without uploading. If no
 Keychain credential is configured, the uploader can still read `JSESSIONID`
-from Chrome's default profile.
+from Chrome's default profile. Run setup in a local Terminal or cmux pane;
+macOS blocks writes to the login Keychain from SSH sessions.
 
 ```bash
 # Replace an existing form

@@ -57,6 +57,8 @@ def login_page(csrf="login-csrf"):
 
 def test_store_keychain_password_uses_secure_prompt(monkeypatch):
     captured = {}
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
 
     def fake_run(command, **kwargs):
         captured["command"] = command
@@ -72,6 +74,20 @@ def test_store_keychain_password_uses_secure_prompt(monkeypatch):
     assert "-U" in command
     assert "user@example.com" in command
     assert captured["kwargs"] == {"check": False}
+
+
+def test_store_keychain_password_explains_ssh_limit(monkeypatch):
+    monkeypatch.setenv("SSH_CONNECTION", "client server")
+    monkeypatch.setattr(
+        upload.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("security should not run over SSH"),
+    )
+
+    with pytest.raises(upload.UploadError, match="local Terminal or cmux") as exc:
+        upload.store_keychain_password("server.surveycto.com", "user@example.com")
+
+    assert exc.value.exit_code == 1
 
 
 def test_read_keychain_password_preserves_significant_whitespace(monkeypatch):

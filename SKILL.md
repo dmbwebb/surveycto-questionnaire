@@ -272,7 +272,9 @@ the repository, shell history, environment, or a command-line argument:
 The command saves a per-server Keychain item and immediately verifies a real
 console login without uploading anything. Repeat it to replace a changed
 password. For unattended use, pass the same `--username` or set
-`$SURVEYCTO_USERNAME`.
+`$SURVEYCTO_USERNAME`. Run setup in a local Terminal or cmux pane on each Mac:
+macOS blocks writes to the login Keychain from SSH sessions. Once saved,
+unattended uploads can be launched remotely.
 
 The fallback is Chrome's default-profile `JSESSIONID`, read via
 `browser_cookie3`. Install dependencies once into the interpreter used for the

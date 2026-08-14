@@ -144,6 +144,14 @@ def store_keychain_password(server: str, username: str) -> None:
     The security tool therefore reads the secret directly from the terminal;
     it never appears in this process's arguments or environment.
     """
+    if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
+        raise UploadError(
+            "macOS does not permit writing the login Keychain from an SSH "
+            "session. Run --setup-keychain once in a local Terminal or cmux "
+            "pane on that Mac.",
+            exit_code=1,
+        )
+
     command = [
         "/usr/bin/security",
         "add-generic-password",
