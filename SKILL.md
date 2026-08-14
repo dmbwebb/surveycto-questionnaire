@@ -617,6 +617,10 @@ Quickest hits:
 - Stable A/B switch: `calculate` with `once(random())`, then `if(${draw} > 0.5, 'a', 'b')`. Never put `random()` directly in `relevance`.
 - Random order of N items per respondent: pre-randomize externally, save as `;`-separated string, pull with `pulldata`, unpack via `item-at(';', list, index() - 1)` inside a `begin repeat`.
 
+### Select from earlier answers (in-form nomination dedup)
+
+To let a later question offer the respondent's OWN earlier free-text answers as choices (e.g. name-nomination rounds where round 2 can reuse round-1 names — kills any manual-dedup step): use FIXED text slots (`name_1..name_3`, each relevant on the previous being non-empty), then a `select_multiple` over a choice list whose rows have `label = ${name_1}` etc. plus fixed `new`/`none` options, with a `filter` column and `choice_filter = filter = 'fixed' or (filter = 'a1' and ${name_1} != '') or ...` to hide empty slots. Downstream per-person questions become fixed field-list blocks, one per slot, relevant on that slot's name; roles/flags are derived by calculates over the `selected()` sets. Fixed slots beat repeats here — repeat answers can't feed choice lists without `indexed-repeat()` gymnastics. Worked example: STATUS QUO BIAS `background/scoping/questionnaires/build_sqb_pilot_recruiter_v2.py` (Phase 4). The checker cannot validate `choice_filter` semantics — device/web-test the flow before deploying.
+
 ## Naming Conventions
 
 **Question names:**
