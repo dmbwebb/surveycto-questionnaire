@@ -2,8 +2,8 @@
 """Upload (or replace) a SurveyCTO form definition from the CLI.
 
 Reverse-engineered from the SurveyCTO web console's POST to
-``/console/forms/{groupId}/upload``. Authenticates by reading the user's
-existing SurveyCTO session cookie from Chrome — no password handling.
+``/console/forms/{groupId}/upload``. Authenticates from the macOS Keychain,
+an explicit cookie, or the user's existing SurveyCTO session in Chrome.
 
 USAGE
     # Upload a NEW form (appends to root group)
@@ -20,6 +20,14 @@ USAGE
     # Server is required — pass --server or set $SURVEYCTO_SERVER
     python3 scripts/surveycto_upload.py form.xlsx --server your-server.surveycto.com
 
+    # One-time setup on each Mac (security prompts for the password itself)
+    python3 scripts/surveycto_upload.py --setup-keychain \
+        --server your-server.surveycto.com --username you@example.com
+
+    # Verify unattended login without uploading anything
+    python3 scripts/surveycto_upload.py --login-only \
+        --server your-server.surveycto.com --username you@example.com
+
     # NEW: upload directly from a Google Sheet (auto-export to temp xlsx first)
     python3 scripts/surveycto_upload.py --from-gsheet <doc_id_or_pointer> \
         --update school_survey_k2_endline
@@ -30,10 +38,12 @@ USAGE
     #     to recover the doc_id.
 
 PREREQUISITES
-    - You must be logged in to the SurveyCTO web console in Chrome
-      (default profile). The script reads JSESSIONID from Chrome's cookie store.
-    - System Python deps (one-time):
-        /usr/local/bin/python3 -m pip install --user browser_cookie3 requests
+    - Recommended: run --setup-keychain once on each Mac. The password is
+      entered directly into macOS's security tool and is never stored in this
+      script, a shell variable, or a command-line argument.
+    - Otherwise, be logged in to SurveyCTO in Chrome's default profile.
+    - Python deps in the interpreter used to run this script (one-time):
+        python3 -m pip install browser_cookie3 requests
 
 EXIT CODES
     0  success
@@ -48,13 +58,18 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
+import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import browser_cookie3
 import requests
 
 DEFAULT_SERVER = os.environ.get("SURVEYCTO_SERVER")
+DEFAULT_USERNAME = os.environ.get("SURVEYCTO_USERNAME")
+KEYCHAIN_SERVICE_PREFIX = "surveycto-console"
 
 # Multipart field names captured from the live web console request:
 #   files_attach=on, keepMediaFiles=on, draft=false, authToken=,
@@ -76,35 +91,216 @@ class UploadError(Exception):
         self.exit_code = exit_code
 
 
-def load_session(server: str, cookie_string: str | None = None) -> requests.Session:
+def _new_session() -> requests.Session:
+    """Return a consistently configured HTTP session."""
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "surveycto-upload-cli/1.1",
+        "X-Requested-With": "XMLHttpRequest",
+    })
+    return session
+
+
+def keychain_service(server: str) -> str:
+    """Return the per-server macOS Keychain service name."""
+    return f"{KEYCHAIN_SERVICE_PREFIX}:{server}"
+
+
+def read_keychain_password(server: str, username: str) -> str | None:
+    """Read a SurveyCTO password from macOS Keychain without displaying it."""
+    command = [
+        "/usr/bin/security",
+        "find-generic-password",
+        "-a", username,
+        "-s", keychain_service(server),
+        "-w",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return None
+
+    if result.returncode == 44:
+        return None
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"exit status {result.returncode}"
+        raise UploadError(
+            f"Could not read the SurveyCTO credential from macOS Keychain: "
+            f"{detail}",
+            exit_code=1,
+        )
+    return result.stdout.removesuffix("\n")
+
+
+def store_keychain_password(server: str, username: str) -> None:
+    """Prompt securely and add or replace a per-server Keychain credential.
+
+    ``security -w`` is deliberately the final argument with no password value.
+    The security tool therefore reads the secret directly from the terminal;
+    it never appears in this process's arguments or environment.
+    """
+    command = [
+        "/usr/bin/security",
+        "add-generic-password",
+        "-U",
+        "-a", username,
+        "-s", keychain_service(server),
+        "-l", f"SurveyCTO console: {server}",
+        "-j", "Used by surveycto_upload.py for unattended console login",
+        "-w",
+    ]
+    try:
+        result = subprocess.run(command, check=False)
+    except FileNotFoundError as exc:
+        raise UploadError(
+            "macOS Keychain's /usr/bin/security tool is unavailable.",
+            exit_code=1,
+        ) from exc
+    if result.returncode != 0:
+        raise UploadError(
+            "The SurveyCTO Keychain credential was not saved.",
+            exit_code=1,
+        )
+
+
+def login_with_password(
+    server: str,
+    username: str,
+    password: str,
+) -> requests.Session:
+    """Create a SurveyCTO console session using local account credentials."""
+    session = _new_session()
+    login_page = session.get(f"https://{server}/index.html", timeout=20)
+    login_page.raise_for_status()
+    csrf_match = CSRF_RE.search(login_page.text)
+    if not csrf_match:
+        raise UploadError(
+            "Could not find the login CSRF token. SurveyCTO's login page may "
+            "have changed.",
+            exit_code=2,
+        )
+    login_csrf = csrf_match.group(1)
+
+    options_response = session.post(
+        f"https://{server}/users/options",
+        params={"t": int(time.time() * 1000)},
+        data={"u": username},
+        headers={"X-csrf-token": login_csrf},
+        timeout=20,
+    )
+    options_response.raise_for_status()
+    try:
+        options = options_response.json()
+    except ValueError as exc:
+        raise UploadError(
+            "SurveyCTO returned an unexpected response while checking the "
+            "account's login method.",
+            exit_code=2,
+        ) from exc
+    if options.get("requiresExternalAuth") is True:
+        raise UploadError(
+            "This SurveyCTO account requires external single sign-on, so a "
+            "stored password cannot create an unattended console session.",
+            exit_code=1,
+        )
+
+    login_response = session.post(
+        f"https://{server}/login",
+        params={"spring-security-redirect": "/"},
+        data={
+            "username": username,
+            "password": password,
+            "csrf_token": login_csrf,
+            "timezoneOffsetMinutes": "0",
+        },
+        timeout=20,
+    )
+    login_response.raise_for_status()
+    final_path = urlparse(login_response.url).path
+    if (
+        final_path in ("/index.html", "/login")
+        or 'id="login-password"' in login_response.text
+    ):
+        raise UploadError(
+            "SurveyCTO rejected the stored username or password. Run "
+            "--setup-keychain again to replace the credential.",
+            exit_code=1,
+        )
+
+    setattr(session, "_surveycto_auth_source", "keychain")
+    return session
+
+
+def load_session(
+    server: str,
+    cookie_string: str | None = None,
+    username: str | None = None,
+    auth_mode: str = "auto",
+) -> requests.Session:
     """Build a requests Session authenticated to the given SurveyCTO server.
 
     Order of preference:
       1. Explicit ``cookie_string`` arg (e.g. "JSESSIONID=...; _uid=...")
       2. SURVEYCTO_COOKIE environment variable
-      3. Chrome cookie jar (default profile, domain-filtered)
+      3. macOS Keychain credential when a username is supplied
+      4. Chrome cookie jar (default profile, domain-filtered)
+
+    ``auth_mode`` can force ``keychain`` or ``chrome``. In ``auto`` mode, a
+    configured Keychain credential wins over Chrome so an expired browser
+    session cannot break unattended uploads.
     """
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": "surveycto-upload-cli/1.0",
-        "X-Requested-With": "XMLHttpRequest",
-    })
+    if auth_mode not in {"auto", "keychain", "chrome"}:
+        raise ValueError(f"Unsupported authentication mode: {auth_mode}")
+
+    session = _new_session()
 
     cookie_string = cookie_string or os.environ.get("SURVEYCTO_COOKIE")
     if cookie_string:
         for part in cookie_string.split(";"):
             if "=" in part:
                 k, v = part.strip().split("=", 1)
-                s.cookies.set(k, v, domain=server)
-        return s
+                session.cookies.set(k, v, domain=server)
+        setattr(session, "_surveycto_auth_source", "cookie")
+        return session
+
+    username = username or DEFAULT_USERNAME
+    if auth_mode in {"auto", "keychain"}:
+        if not username:
+            if auth_mode == "keychain":
+                raise UploadError(
+                    "Keychain authentication needs --username or "
+                    "$SURVEYCTO_USERNAME.",
+                    exit_code=1,
+                )
+        else:
+            password = read_keychain_password(server, username)
+            if password is not None:
+                return login_with_password(server, username, password)
+            if auth_mode == "keychain":
+                raise UploadError(
+                    f"No SurveyCTO Keychain credential was found for {server}. "
+                    "Run --setup-keychain once on this Mac.",
+                    exit_code=1,
+                )
+
+    if auth_mode == "keychain":
+        raise AssertionError(
+            "keychain authentication should have returned or raised"
+        )
 
     try:
         jar = browser_cookie3.chrome(domain_name=server)
     except Exception as e:
         raise UploadError(
             f"Failed to read Chrome cookies for {server}: {e}\n"
-            "Either log into SurveyCTO in Chrome (default profile), "
-            "or pass --cookie 'JSESSIONID=...; _uid=...' / set $SURVEYCTO_COOKIE.",
+            "Run --setup-keychain (recommended), log into SurveyCTO in "
+            "Chrome's default profile, or pass --cookie / set "
+            "$SURVEYCTO_COOKIE.",
             exit_code=1,
         )
 
@@ -112,23 +308,35 @@ def load_session(server: str, cookie_string: str | None = None) -> requests.Sess
     if not any(c.name == "JSESSIONID" for c in cookies):
         raise UploadError(
             f"No JSESSIONID cookie found for {server} in Chrome.\n"
-            "Make sure you're logged in to the SurveyCTO console in Chrome's "
-            "default profile (not an Incognito or different-profile window).",
+            "Run --setup-keychain (recommended), or log into the SurveyCTO "
+            "console in Chrome's default profile.",
             exit_code=1,
         )
 
-    s.cookies = jar
-    return s
+    session.cookies = jar
+    setattr(session, "_surveycto_auth_source", "chrome")
+    return session
 
 
 def fetch_csrf_token(session: requests.Session, server: str) -> str:
     """Scrape ``var csrfToken`` from main.html. Validates session is alive."""
     url = f"https://{server}/main.html"
     r = session.get(url, timeout=20)
-    if r.status_code in (401, 403):
+    final_path = urlparse(r.url).path
+    is_login_page = (
+        final_path in ("/index.html", "/login")
+        or 'id="login-password"' in r.text
+    )
+    if r.status_code in (401, 403) or is_login_page:
+        source = getattr(session, "_surveycto_auth_source", "session")
+        remedy = (
+            "Run --setup-keychain again to replace the stored credential."
+            if source == "keychain"
+            else "Log in to the console in Chrome or run --setup-keychain."
+        )
         raise UploadError(
             f"Authentication failed (HTTP {r.status_code}) — your SurveyCTO "
-            "session has expired. Log in to the console in Chrome and retry.",
+            f"{source} authentication is not valid. {remedy}",
             exit_code=1,
         )
     r.raise_for_status()
@@ -279,6 +487,25 @@ def main(argv: list[str] | None = None) -> int:
              "Otherwise reads $SURVEYCTO_COOKIE or Chrome's cookie jar.",
     )
     p.add_argument(
+        "--username", default=DEFAULT_USERNAME,
+        help="SurveyCTO login email for Keychain authentication. Defaults to "
+             "$SURVEYCTO_USERNAME.",
+    )
+    p.add_argument(
+        "--auth", choices=("auto", "keychain", "chrome"), default="auto",
+        help="Authentication source (default: auto, preferring Keychain when "
+             "configured and otherwise using Chrome).",
+    )
+    p.add_argument(
+        "--setup-keychain", action="store_true",
+        help="Securely prompt for and store the SurveyCTO password in this "
+             "Mac's Keychain, then verify the login. No form is required.",
+    )
+    p.add_argument(
+        "--login-only", action="store_true",
+        help="Verify console authentication without uploading a form.",
+    )
+    p.add_argument(
         "--dry-run", action="store_true",
         help="Authenticate and print plan, but don't actually upload.",
     )
@@ -292,12 +519,41 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    if args.setup_keychain and not args.username:
+        print(
+            "error: --setup-keychain needs --username or "
+            "$SURVEYCTO_USERNAME.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.setup_keychain:
+        print(
+            f"Saving SurveyCTO credential for {args.username} on {args.server}.\n"
+            "Enter the password at the macOS Keychain prompt:",
+        )
+        try:
+            store_keychain_password(args.server, args.username)
+        except KeyboardInterrupt:
+            print("\nKeychain setup cancelled; no credential was saved.",
+                  file=sys.stderr)
+            return 1
+        except UploadError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return e.exit_code
+        args.auth = "keychain"
+
     # Resolve the input form: either a local xlsx OR a gsheet (auto-export).
     # Exactly one source must be provided.
     if args.from_gsheet and args.form_xlsx:
         print("error: pass form_xlsx OR --from-gsheet, not both.", file=sys.stderr)
         return 2
-    if not args.from_gsheet and not args.form_xlsx:
+    if (
+        not args.from_gsheet
+        and not args.form_xlsx
+        and not args.login_only
+        and not args.setup_keychain
+    ):
         print("error: provide form_xlsx or --from-gsheet <doc_id_or_pointer>.",
               file=sys.stderr)
         return 2
@@ -319,7 +575,7 @@ def main(argv: list[str] | None = None) -> int:
                         ignore_errors=True)
         print(f"resolved gsheet {args.from_gsheet} -> {gsheet_temp_path}")
 
-    if not args.form_xlsx.is_file():
+    if args.form_xlsx is not None and not args.form_xlsx.is_file():
         print(f"error: form xlsx not found: {args.form_xlsx}", file=sys.stderr)
         return 2
     for mf in args.media:
@@ -328,20 +584,35 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     try:
-        session = load_session(args.server, args.cookie)
+        session = load_session(
+            args.server,
+            args.cookie,
+            username=args.username,
+            auth_mode=args.auth,
+        )
         csrf = fetch_csrf_token(session, args.server)
     except UploadError as e:
         print(f"error: {e}", file=sys.stderr)
         return e.exit_code
+    except requests.RequestException as e:
+        print(f"network error during SurveyCTO login: {e}", file=sys.stderr)
+        return 2
+
+    auth_source = getattr(session, "_surveycto_auth_source", "session")
+    print(f"server:    {args.server}")
+    print(f"auth:      {auth_source} (ok)")
+    print(f"csrf:      {len(csrf)}-char token (ok)")
+
+    if args.form_xlsx is None:
+        print("OK: SurveyCTO console login verified; no form uploaded.")
+        return 0
 
     action = f"replace '{args.update}'" if args.update else "create new form"
-    print(f"server:    {args.server}")
     print(f"action:    {action}")
     print(f"form xlsx: {args.form_xlsx} ({args.form_xlsx.stat().st_size} bytes)")
     for mf in args.media:
         print(f"media:     {mf} ({mf.stat().st_size} bytes)")
     print(f"draft:     {args.draft}")
-    print(f"csrf:      {len(csrf)}-char token (ok)")
 
     if args.dry_run:
         print("\n[dry-run] Skipping upload.")

@@ -258,42 +258,69 @@ Output format:
 
 ### How it works (one-time setup)
 
-1. Be logged in to the target SurveyCTO console in **Chrome's default profile** (the script reads `JSESSIONID` from Chrome's cookie store via `browser_cookie3`).
-2. Install deps once for the system Python:
+On macOS, store the account password in Keychain once on each Mac. The
+`security` tool prompts for the password itself, so the secret never appears in
+the repository, shell history, environment, or a command-line argument:
 
 ```bash
-/usr/local/bin/python3 -m pip install --user browser_cookie3 requests
+~/.venvs/lifecoach/bin/python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
+    --setup-keychain \
+    --server your-server.surveycto.com \
+    --username you@example.com
 ```
 
-⚠️ **Always invoke `surveycto_upload.py` with `/usr/local/bin/python3` explicitly, not bare `python3`.** On many Macs `python3` resolves to homebrew (`/opt/homebrew/bin/python3` or similar) which does NOT have `browser_cookie3` installed — you'll get `ModuleNotFoundError: No module named 'browser_cookie3'` even though the install command above succeeded. The dep install path and the invocation path must match.
+The command saves a per-server Keychain item and immediately verifies a real
+console login without uploading anything. Repeat it to replace a changed
+password. For unattended use, pass the same `--username` or set
+`$SURVEYCTO_USERNAME`.
 
-No password handling, no API token, no `--cookie` flag required as long as the user is logged in to Chrome. (If they aren't, fall back to `--cookie 'JSESSIONID=...; _uid=...'` or `$SURVEYCTO_COOKIE`.)
+The fallback is Chrome's default-profile `JSESSIONID`, read via
+`browser_cookie3`. Install dependencies once into the interpreter used for the
+script:
+
+```bash
+~/.venvs/lifecoach/bin/python3 -m pip install browser_cookie3 requests
+```
+
+On Duncan's Macs, always invoke `surveycto_upload.py` with
+`~/.venvs/lifecoach/bin/python3`, not bare `python3`. The venv has the shared
+Google and browser-cookie dependencies and exists at the same path on both
+machines.
+
+Authentication order is an explicit cookie, a configured Keychain credential,
+then Chrome. `--auth keychain` or `--auth chrome` forces a source. A password is
+only read from Keychain into the process long enough to create the session and
+is never printed or persisted elsewhere.
 
 ### Usage
 
 ```bash
 # Replace an existing form (most common case — pair with media files)
-/usr/local/bin/python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
+~/.venvs/lifecoach/bin/python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
     --update ai_screening_main_v1 \
     --media path/to/plugin.fieldplugin.zip \
     path/to/ai_screening_main_v1.xlsx
 
 # Upload a NEW form (appends to root group)
-/usr/local/bin/python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
+~/.venvs/lifecoach/bin/python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
     path/to/new_form.xlsx
 
 # Multiple media files
-/usr/local/bin/python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
+~/.venvs/lifecoach/bin/python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
     -u my_form -m a.zip -m b.png -m choices.csv path/to/form.xlsx
 
 # Override server for a single run (normally read from $SURVEYCTO_SERVER)
-/usr/local/bin/python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
+~/.venvs/lifecoach/bin/python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
     --server other-server.surveycto.com \
     path/to/form.xlsx
 
 # Dry run (auth + csrf check + plan, no upload)
-/usr/local/bin/python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
+~/.venvs/lifecoach/bin/python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
     --dry-run path/to/form.xlsx
+
+# Verify unattended login only (no form needed)
+~/.venvs/lifecoach/bin/python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
+    --login-only --username you@example.com
 ```
 
 ### Flags
@@ -307,12 +334,16 @@ No password handling, no API token, no `--cookie` flag required as long as the u
 | `--parent-group-id N` | `1` | Group ID to upload into (`1` = root) |
 | `--draft` | off | Upload as draft instead of deploying immediately |
 | `--cookie 'JSESSIONID=...; _uid=...'` | Chrome cookie jar | Override cookie source |
+| `--username EMAIL` | `$SURVEYCTO_USERNAME` | Account for Keychain authentication |
+| `--auth auto\|keychain\|chrome` | `auto` | Choose authentication source; auto prefers a configured Keychain item |
+| `--setup-keychain` | off | Securely prompt for and store the password, then verify login; no form required |
+| `--login-only` | off | Verify console authentication without uploading |
 | `--dry-run` | off | Authenticate, scrape CSRF, print plan; skip the actual upload |
 
 ### Exit codes
 
 - `0` — success
-- `1` — auth/cookie error (not logged in, JSESSIONID missing, session expired)
+- `1` — authentication error (missing/rejected Keychain credential, missing/expired cookie, or external single sign-on account)
 - `2` — network/HTTP error
 - `3` — server-side rejection (form parse error, version-bump rule, validation, etc.) — the server's error message is printed verbatim
 
@@ -338,8 +369,10 @@ Header: `X-Requested-With: XMLHttpRequest`. Auth: standard Java servlet `JSESSIO
 - **Version bump rule.** SurveyCTO refuses to replace a form unless `settings.version` in the new xlsx is **lexically greater** than the deployed version. Versions are also capped at **10 digits** ("must be a number less than or equal to 9999999999") — `YYYYMMDDHHMM` is rejected; for same-day redeploys use `YYYYMMDD` + a 2-digit quarter-hour serial (`(hour*60+min)//15`, 00–95). The CLI passes the server's exact error message through (e.g. `you can't change the form attachments without also increasing the version number ... lexically greater than the previous one (2026040705)`). Bump the version in the `settings` sheet of the xlsx and retry. The convention used in this project is `YYYYMMDDNN` (e.g. `2026040801`). If you wrote the version as a `NOW()`-based formula, run `recalc_excel.sh` to evaluate it before uploading — SurveyCTO does not evaluate Excel formulas.
 - **Field-plugin manifest version bump rule.** The same lexically-greater rule applies independently to attached field-plugin zips. SurveyCTO scans the `version` field in `manifest.json` inside the `.fieldplugin.zip` and rejects with `The version of the field plug-in "<name>" (<old>) should be greater than <old>` if it isn't bumped. Bump `manifest.json::version` (project convention `YYYY.MMDD.HHMM`, e.g. `2026.508.1130`) before rebuilding the zip — re-uploading an unchanged-version plugin under the same form fails even if the form xlsx version is fresh.
 - **`#ERROR!` in upload-sensitive columns.** Google Sheets formulas can leave `#ERROR!` in columns SurveyCTO parses (`required`, `relevance`, `calculation`, `constraint`, etc.); SurveyCTO rejects these with messages like `Invalid 'required' expression [#ERROR!]`. Clear the bad cell in the live gsheet and retry. Ignore `#ERROR!` in unnamed helper columns unless it feeds a parsed column.
-- **Session expired.** If you see `error: Authentication failed (HTTP 403)`, log into the SurveyCTO console in Chrome again (the JSESSIONID has expired) and retry.
-- **Check the session EARLY in multi-step deploys.** `load_session(server)` + `GET /forms/{id}/files` is a cheap validity probe; an expired session needs the *user* to log in, so probe before long build/deploy prep and escalate immediately (say + focused login tab) rather than discovering it at upload time.
+- **Stored password changed.** If Keychain authentication is rejected, rerun `--setup-keychain --username ...` on that Mac. The item is replaced in place and the command verifies it immediately.
+- **External single sign-on accounts.** Keychain login cannot automate a Google or other external identity-provider flow. Use a local SurveyCTO password account, or fall back to a live Chrome session for that account.
+- **Session expired.** Keychain mode creates a fresh session each run. In Chrome mode, an expired `JSESSIONID` requires logging into the SurveyCTO console again.
+- **Check the session EARLY in multi-step deploys.** `load_session(server, username=...)` + `fetch_csrf_token(session, server)` is a cheap validity probe. Run it before long build/deploy prep so a credential problem is surfaced immediately.
 - **Wrong Chrome profile.** `browser_cookie3.chrome()` reads the **default** Chrome profile. If the user is logged into SurveyCTO in a non-default profile, pass cookies explicitly with `--cookie` or set `$SURVEYCTO_COOKIE`.
 - **Drive `.gsheet` pointer hangs.** If `surveycto_upload.py --from-gsheet path/to/form.gsheet` stalls while reading a Google Drive Desktop stub, pass the raw doc id instead; the export path still uses the same live Sheet.
 - **Group ID for non-root uploads.** `--parent-group-id` defaults to `1` (root group). If the user wants the form inside a specific group, find that group's id by inspecting the SurveyCTO Design page (or just upload to root and let the user drag it).

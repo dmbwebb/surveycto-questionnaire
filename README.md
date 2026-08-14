@@ -10,7 +10,7 @@ When loaded into [Claude Code](https://docs.claude.com/claude-code), this skill 
 - **Validate XLSForms** — catches broken field references, undefined choice lists, expression syntax errors, duplicate names, missing translations, and ~20 other issues before you upload.
 - **Preserve Excel formatting** — conditional formatting, red-text translation markers, cell styles.
 - **Convert to readable text** — dump the whole form (labels, logic, choices) to plain text for review, sharing with non-technical collaborators, or diffing across versions.
-- **Upload directly to SurveyCTO** — replaces a form definition in one command by reverse-engineering the web console's upload endpoint. No password handling — authenticates via your existing Chrome session cookie.
+- **Upload directly to SurveyCTO** — replaces a form definition in one command by reverse-engineering the web console's upload endpoint. On macOS, unattended login uses a password stored in Keychain; an existing Chrome session remains a fallback.
 
 ## Installation
 
@@ -83,7 +83,20 @@ Flags: `--no-names`, `--no-relevance`, `--no-choices`, `--keep-html`.
 
 ### `surveycto_upload.py` — deploy form to SurveyCTO
 
-Requires you to be logged into the SurveyCTO web console in Chrome's default profile (the script reads `JSESSIONID` from Chrome's cookie store — no password needed).
+For unattended macOS use, store the account password once in Keychain. The
+`security` tool prompts directly, so the password is not passed on the command
+line or stored in the repository:
+
+```bash
+python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_upload.py" \
+    --setup-keychain \
+    --server your-server.surveycto.com \
+    --username you@example.com
+```
+
+The setup command immediately verifies the login without uploading. If no
+Keychain credential is configured, the uploader can still read `JSESSIONID`
+from Chrome's default profile.
 
 ```bash
 # Replace an existing form
@@ -109,8 +122,8 @@ Use before uploading if your `settings.version` is a `NOW()`-based formula — S
 ## Requirements
 
 - Python 3.9+
-- Chrome (default profile) logged into SurveyCTO — only for the upload script
-- macOS or Linux (the upload script uses `browser_cookie3`, which works on Windows too but is less tested)
+- macOS Keychain for unattended upload login, or Chrome's default profile logged into SurveyCTO as a fallback
+- macOS or Linux (Keychain setup is macOS-only; Chrome-cookie authentication also works on Linux and Windows but is less tested)
 - Python packages: `openpyxl`, `browser_cookie3`, `requests`
 
 ## Full reference
