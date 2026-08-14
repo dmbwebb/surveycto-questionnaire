@@ -152,6 +152,11 @@ def store_keychain_password(server: str, username: str) -> None:
             exit_code=1,
         )
 
+    print(
+        f"Saving SurveyCTO credential for {username} on {server}.\n"
+        "Enter the password at the macOS Keychain prompt:",
+        flush=True,
+    )
     command = [
         "/usr/bin/security",
         "add-generic-password",
@@ -536,10 +541,6 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.setup_keychain:
-        print(
-            f"Saving SurveyCTO credential for {args.username} on {args.server}.\n"
-            "Enter the password at the macOS Keychain prompt:",
-        )
         try:
             store_keychain_password(args.server, args.username)
         except KeyboardInterrupt:
