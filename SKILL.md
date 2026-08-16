@@ -173,7 +173,7 @@ The checker (`surveycto_checker.py`) performs these checks:
 | Empty groups | Error | Groups/repeats with no enabled children (all disabled) |
 | Expression syntax | Error | Unbalanced parentheses, unclosed `${}`, unclosed quotes |
 | ODK-isms | Error | `==` equality; unsupported functions `starts-with()`, `contains()`, `substring-before/after()` |
-| Upload parser blockers | Error | `#ERROR!` in parsed columns, expression-only blank rows, self-references |
+| Upload parser blockers | Error | `#ERROR!` in parsed columns, expression-only blank rows, and XPath dependency cycles across relevance/calculation/required |
 | Field references | Error | `${field_name}` pointing to non-existent fields |
 | Choice list references | Error | `select_one`/`select_multiple` referencing undefined lists |
 | Choices field references | Error | `${field}` in choice labels pointing to non-existent fields |

@@ -5,6 +5,7 @@ SurveyCTO Form Checker
 Validates XLSForm files for common errors:
 - Expression syntax errors (unbalanced parentheses, unclosed ${} references, unclosed quotes)
 - References to non-existent fields in relevance, choice_filter, calculation, and constraint expressions
+- Multi-field XPath dependency cycles across relevance, calculation, and required expressions
 - Undefined choice lists
 - Missing required columns
 - Typos in field names and labels
@@ -43,7 +44,8 @@ class SurveyCTOChecker:
 
     EXPRESSION_COLUMNS = ('relevance', 'calculation', 'constraint', 'choice_filter',
                           'repeat_count', 'default')
-    SELF_REFERENCE_COLUMNS = ('relevance', 'calculation')
+    DEPENDENCY_COLUMNS = ('relevance', 'calculation', 'required')
+    SELF_REFERENCE_COLUMNS = DEPENDENCY_COLUMNS
     # XPath string functions the ODK docs list but SurveyCTO's JavaRosa parser rejects.
     UNSUPPORTED_ODK_FUNCTIONS = ('starts-with', 'contains',
                                  'substring-before', 'substring-after')
@@ -611,18 +613,66 @@ class SurveyCTOChecker:
         """Return True when a spreadsheet cell has non-whitespace content."""
         return pd.notna(value) and bool(str(value).strip())
 
+    @staticmethod
+    def _find_dependency_cycles(graph):
+        """Return multi-field strongly connected components in a dependency graph."""
+        next_index = 0
+        indices = {}
+        lowlinks = {}
+        stack = []
+        on_stack = set()
+        cycles = []
+
+        def visit(node):
+            nonlocal next_index
+            indices[node] = next_index
+            lowlinks[node] = next_index
+            next_index += 1
+            stack.append(node)
+            on_stack.add(node)
+
+            for dependency in graph.get(node, set()):
+                if dependency not in indices:
+                    visit(dependency)
+                    lowlinks[node] = min(lowlinks[node], lowlinks[dependency])
+                elif dependency in on_stack:
+                    lowlinks[node] = min(lowlinks[node], indices[dependency])
+
+            if lowlinks[node] != indices[node]:
+                return
+
+            component = []
+            while True:
+                member = stack.pop()
+                on_stack.remove(member)
+                component.append(member)
+                if member == node:
+                    break
+            if len(component) > 1:
+                cycles.append(sorted(component))
+
+        for node in graph:
+            if node not in indices:
+                visit(node)
+
+        return sorted(cycles)
+
     def check_upload_parser_blockers(self):
         """Catch parser-level issues that SurveyCTO rejects at upload time.
 
         These are stricter than the local semantic checks above:
         - Spreadsheet formula errors in upload-sensitive XLSForm columns.
         - Spacer rows with no type/name/label but with relevance/calculation/etc.
-        - Self-referential relevance/calculation expressions, which create XPath
-          dependency cycles in SurveyCTO.
+        - Self-references and multi-field cycles across relevance, calculation,
+          and required expressions, which SurveyCTO rejects as XPath dependency
+          cycles.
         """
         print("\n=== Checking SurveyCTO Upload Parser Blockers ===")
 
         issues = []
+        existing_fields = set(self.survey_df['name'].dropna().astype(str))
+        dependency_graph = {name: set() for name in existing_fields}
+        field_rows = {}
 
         for idx, row in self.survey_df.iterrows():
             field_type = row.get('type', '')
@@ -658,6 +708,16 @@ class SurveyCTOChecker:
 
             if self._has_text(field_name):
                 name = str(field_name).strip()
+                field_rows[name] = idx + 2
+                for col in self.DEPENDENCY_COLUMNS:
+                    expression = row.get(col)
+                    if not self._has_text(expression):
+                        continue
+                    for ref in re.findall(r'\$\{([^}]+)\}', str(expression)):
+                        base_ref = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)', ref)
+                        if base_ref and base_ref.group(1) in existing_fields:
+                            dependency_graph[name].add(base_ref.group(1))
+
                 for col in self.SELF_REFERENCE_COLUMNS:
                     expression = row.get(col)
                     if not self._has_text(expression):
@@ -673,6 +733,16 @@ class SurveyCTOChecker:
                                     f"Self-reference in {col}: {str(expression)}"
                                 ),
                             })
+
+        for cycle in self._find_dependency_cycles(dependency_graph):
+            issues.append({
+                'row': min(field_rows.get(name, 0) for name in cycle),
+                'field': ', '.join(cycle),
+                'problem': (
+                    "XPath dependency cycle across relevance/calculation/required: "
+                    + ' -> '.join(cycle)
+                ),
+            })
 
         if issues:
             print(f"\n❌ Found {len(issues)} SurveyCTO upload parser blocker(s):\n")
