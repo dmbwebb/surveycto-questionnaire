@@ -7,6 +7,8 @@ Validates XLSForm files for common errors:
 - References to non-existent fields in relevance, choice_filter, calculation, and constraint expressions
 - Multi-field XPath dependency cycles across relevance, calculation, and required expressions
 - Undefined choice lists
+- Markup in dynamic search() choice rows (silently blanks the picker in that language)
+- Plain calculate over the `end` metadata field (never populates; use calculate_here)
 - Missing required columns
 - Typos in field names and labels
 - Missing constraint messages
@@ -1858,6 +1860,120 @@ class SurveyCTOChecker:
             print(f"  ⚠️  Could not check version: {e}")
             return True  # Don't fail the whole check for this
 
+    def check_dynamic_choice_labels(self):
+        """Dynamic search() choice rows must hold bare column names, not markup.
+
+        SurveyCTO reads a dynamic choice row's value/label cells as the names of
+        columns in the attached data source, and it does so in EVERY language
+        column. Wrapping a translation in <i>...</i> (or red-font markup, or a
+        stray space) makes the first and last comma-separated tokens something
+        like "<i>respondent_name" and "interview_date</i>", which match no
+        column, so the picker silently renders blank in that language only.
+        Caught live in Aug 2026: a Bengali endline showed only one of three
+        columns, leaving enumerators unable to tell two same-ID people apart.
+        """
+        print("\n=== Checking Dynamic (search) Choice Labels ===")
+        if self.survey_df is None or self.choices_df is None:
+            return True
+
+        search_lists = set()
+        app_col = self._col(self.survey_df, 'appearance')
+        type_col = self._col(self.survey_df, 'type')
+        if app_col is None or type_col is None:
+            return True
+        for _, row in self.survey_df.iterrows():
+            app = str(row.get(app_col) or '')
+            if 'search(' not in app:
+                continue
+            tp = str(row.get(type_col) or '')
+            m = re.match(r'select_(?:one|multiple)\s+(\S+)', tp.strip())
+            if m:
+                search_lists.add(m.group(1))
+        if not search_lists:
+            print("  ℹ️  No search()-backed choice lists")
+            return True
+
+        list_col = self._col(self.choices_df, 'list_name')
+        if list_col is None:
+            return True
+        target_cols = [c for c in self.choices_df.columns
+                       if str(c).lower() == 'value' or str(c).lower() == 'name'
+                       or str(c).lower().startswith('label')]
+        found = False
+        for idx, row in self.choices_df.iterrows():
+            if str(row.get(list_col) or '').strip() not in search_lists:
+                continue
+            for col in target_cols:
+                cell = row.get(col)
+                if cell is None or str(cell).strip() == '' or str(cell) == 'nan':
+                    continue
+                text = str(cell)
+                if re.search(r'<[^>]+>', text):
+                    found = True
+                    msg = (f"Row {idx + 2}: dynamic search() choice list "
+                           f"'{row.get(list_col)}' has markup in column '{col}': "
+                           f"{text!r}\n    These cells name data-source COLUMNS in "
+                           f"every language. Strip the markup or the picker "
+                           f"renders blank in this language.")
+                    print(f"  ❌ {msg}")
+                    self.errors.append(msg)
+        if not found:
+            print(f"  ✅ {len(search_lists)} search()-backed list(s) hold bare column names")
+        return not found
+
+    def check_end_metadata_arithmetic(self):
+        """A plain calculate over the `end` metadata field never populates.
+
+        `end` is stamped when the form is finalised, and a plain `calculate` is
+        not re-evaluated at that moment, so an interview-duration field written
+        as round((decimal-date-time(${end_time}) - ...) * 86400, 0) exports
+        EMPTY. Confirmed against real submissions in Aug 2026. Use
+        `calculate_here` with `once(duration())` on the form's last row instead.
+        """
+        print("\n=== Checking Duration Calculations ===")
+        if self.survey_df is None:
+            return True
+        type_col = self._col(self.survey_df, 'type')
+        name_col = self._col(self.survey_df, 'name')
+        calc_col = self._col(self.survey_df, 'calculation')
+        if type_col is None or calc_col is None:
+            return True
+
+        end_fields = {str(r.get(name_col)).strip()
+                      for _, r in self.survey_df.iterrows()
+                      if str(r.get(type_col) or '').strip() == 'end'
+                      and str(r.get(name_col) or '').strip() not in ('', 'nan')}
+        if not end_fields:
+            print("  ℹ️  No `end` metadata field declared")
+            return True
+
+        hits = 0
+        for idx, row in self.survey_df.iterrows():
+            if str(row.get(type_col) or '').strip() != 'calculate':
+                continue
+            calc = str(row.get(calc_col) or '')
+            if not any('${%s}' % f in calc for f in end_fields):
+                continue
+            hits += 1
+            msg = (f"Row {idx + 2}: '{row.get(name_col)}' is a plain `calculate` "
+                   f"referencing the `end` metadata field. `end` is only stamped "
+                   f"at finalisation and plain calculates are not re-evaluated "
+                   f"then, so this exports EMPTY. Use `calculate_here` with "
+                   f"`once(duration())` on the last row of the form.")
+            print(f"  ⚠️  {msg}")
+            self.warnings.append(msg)
+        if not hits:
+            print("  ✅ No plain calculate depends on the `end` metadata field")
+        return True
+
+    def _col(self, df, name):
+        """Case-insensitive column lookup; also tolerates space/underscore."""
+        want = name.lower().replace('_', ' ')
+        for c in df.columns:
+            if str(c).lower().replace('_', ' ') == want:
+                return c
+        return None
+
     def run_all_checks(self):
         """Run all validation checks."""
         print(f"\n{'='*60}")
@@ -1878,6 +1994,8 @@ class SurveyCTOChecker:
         results.append(self.check_field_references())
         results.append(self.check_choices_field_references())
         results.append(self.check_choice_lists())
+        results.append(self.check_dynamic_choice_labels())
+        results.append(self.check_end_metadata_arithmetic())
         results.append(self.check_other_specify_fields())
         results.append(self.check_select_multiple_other())
         results.append(self.check_select_multiple_exclusive())
