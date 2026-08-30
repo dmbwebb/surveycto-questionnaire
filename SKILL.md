@@ -142,6 +142,8 @@ export SURVEYCTO_SERVER="your-server.surveycto.com"
 python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_checker.py" <path_to_xlsform.xlsx>
 ```
 
+The default profile is SurveyCTO and enforces the SurveyCTO-specific `calculate_here` timing pattern. For an ODK or Kobo target, pass `--platform odk` or `--platform kobo`; all portable checks still run, but the incompatible SurveyCTO timing check is skipped.
+
 **This is not optional.** The checker catches errors that will break the form on SurveyCTO:
 - References to non-existent fields (typos in `${field_name}`)
 - Undefined choice lists
@@ -149,6 +151,7 @@ python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_checker.py" <path_to_xlsform.xls
 - Duplicate field names
 - Missing "other specify" fields
 - select_multiple exclusive option constraints
+- Missing or malformed survey and section timing
 - Missing Hindi translations
 - Formatting/conditional formatting preservation
 - And more
@@ -184,6 +187,9 @@ The checker (`surveycto_checker.py`) performs these checks:
 | select_multiple other | Warning | select_multiple with 'other' but no specify field |
 | Exclusive options | Warning | select_multiple missing constraints for exclusive options (-97, -98) |
 | Impossible literal values | Error | `${var}=X` / `selected(${var}, X)` where `X` is not a valid name/value in `var`'s choice list (silent dead logic) |
+| Survey timing boundaries | Error | Missing `start`/`end` metadata, survey start/end timestamps, overall duration or a final K2 cumulative pair after all respondent input, or malformed canonical survey timing fields |
+| Section timing bundles | Error | No section timing, incomplete or malformed canonical bundles, timing fields split across group paths, or incomplete K2 `duration_*`/`time_*` pairs |
+| Section timing coverage | Warning | Fewer complete timing units than the conservative size heuristic: at least one per 40 question fields or one per two likely substantive groups, whichever is larger |
 | Required fields | Warning | Questions without `required=yes` |
 | Typos | Warning | Common misspellings in field names/labels |
 | Constraint messages | Warning | Fields with constraints but no error message |

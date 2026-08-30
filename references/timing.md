@@ -92,11 +92,15 @@ calculate_here   | time_health            | once(format-date-time(now(), '%Y-%b-
 
 The `duration_*` value is cumulative seconds since the form began, not the duration of that section. Existing K2 analysis subtracts consecutive checkpoints in export order. This compatibility alternative takes precedence over the canonical five-field rule whenever an existing form or cross-wave pipeline depends on it. Add missing K2 coverage in the same convention, and preserve the existing relevance semantics for both members of each pair. Use the self-contained canonical pattern for new forms because it does not depend on the preceding section, export column order, or an unskipped prior checkpoint.
 
+For the checker to treat the final K2 cumulative pair as overall duration coverage, it must be complete and no respondent-input field may follow it before the survey end timestamp. An earlier section pair does not replace overall timing when later questions remain.
+
 ## Optional field-level audit
 
 A `text audit` field with `appearance = eventlog` records per-field navigation and timing. Add it when fine-grained diagnostics are useful, but keep the section timers. The event log is harder to analyze and does not replace clean module-level duration columns.
 
 ## Verification
+
+The checker enforces the standard `start` and `end` metadata, survey-level start and end timestamps, an overall duration or qualifying final K2 cumulative pair, complete canonical timing bundles, and complete K2 compatibility pairs. It errors when a form with respondent-input fields has no recognized section timing. Because code cannot reliably distinguish analytical sections from technical groups, sparse coverage is a warning: the checker expects at least one complete timing unit per 40 question fields or one per two likely substantive groups, whichever is larger. Review that warning against the timing inventory rather than adding timers mechanically to layout groups. These timing checks run under the default SurveyCTO profile; use `--platform odk` or `--platform kobo` to run the portable checker validations without applying SurveyCTO's `calculate_here` rules.
 
 After adding or changing canonical timing rows:
 

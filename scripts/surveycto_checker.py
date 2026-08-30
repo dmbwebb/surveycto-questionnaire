@@ -9,6 +9,8 @@ Validates XLSForm files for common errors:
 - Undefined choice lists
 - Markup in dynamic search() choice rows (silently blanks the picker in that language)
 - Plain calculate over the `end` metadata field (never populates; use calculate_here)
+- Missing or malformed survey-level and section timing instrumentation
+- Implausibly sparse section timing coverage for the questionnaire's size
 - Missing required columns
 - Typos in field names and labels
 - Missing constraint messages
@@ -26,10 +28,11 @@ Validates XLSForm files for common errors:
 - Version formula in settings sheet is evaluated
 
 Usage:
-    python surveycto_checker.py <path_to_xlsform.xlsx>
+    python surveycto_checker.py <path_to_xlsform.xlsx> [--platform surveycto|odk|kobo]
     python surveycto_checker.py  # checks ai_health_pilot_baseline.xlsx by default
 """
 
+import argparse
 import base64
 import binascii
 import re
@@ -57,8 +60,11 @@ class SurveyCTOChecker:
         'read only', 'repeat_count', 'choice_filter', 'default'
     )
 
-    def __init__(self, file_path):
+    def __init__(self, file_path, platform='surveycto'):
         self.file_path = Path(file_path)
+        self.platform = platform.lower()
+        if self.platform not in {'surveycto', 'odk', 'kobo'}:
+            raise ValueError("platform must be one of: surveycto, odk, kobo")
         self.survey_df = None
         self.choices_df = None
         self.settings_df = None
@@ -1966,6 +1972,473 @@ class SurveyCTOChecker:
             print("  ✅ No plain calculate depends on the `end` metadata field")
         return True
 
+    def check_timing_instrumentation(self):
+        """Require survey boundaries and reasonable section timing coverage.
+
+        New forms use the canonical five-field section bundle documented in
+        references/timing.md. Existing K2 forms may instead use adjacent
+        duration_*/time_* cumulative checkpoint pairs. Structural omissions
+        are errors. Coverage below a deliberately conservative size heuristic
+        is a warning because group structure cannot identify semantic sections
+        perfectly.
+        """
+        print("\n=== Checking Timing Instrumentation ===")
+        if self.platform != 'surveycto':
+            print(f"  ℹ️  SurveyCTO calculate_here timing checks skipped for "
+                  f"--platform {self.platform}")
+            return True
+        if self.survey_df is None:
+            return True
+
+        type_col = self._col(self.survey_df, 'type')
+        name_col = self._col(self.survey_df, 'name')
+        calc_col = self._col(self.survey_df, 'calculation')
+        relevance_col = self._col(self.survey_df, 'relevance')
+        appearance_col = self._col(self.survey_df, 'appearance')
+        if type_col is None or name_col is None:
+            return True
+
+        def cell(value):
+            if value is None or pd.isna(value):
+                return ''
+            return str(value).strip()
+
+        rows = []
+        fields = {}
+        for position, (idx, row) in enumerate(self.survey_df.iterrows()):
+            item = {
+                'position': position,
+                'excel_row': idx + 2,
+                'type': cell(row.get(type_col)).lower(),
+                'name': cell(row.get(name_col)),
+                'calculation': cell(row.get(calc_col)) if calc_col else '',
+                'relevance': cell(row.get(relevance_col)) if relevance_col else '',
+                'appearance': cell(row.get(appearance_col)).lower()
+                    if appearance_col else '',
+            }
+            rows.append(item)
+            if item['name']:
+                fields[item['name'].lower()] = item
+
+        structure_stack = []
+        for item in rows:
+            item['group_path'] = tuple(structure_stack)
+            if item['type'] in {'begin group', 'begin repeat'}:
+                structure_stack.append((item['type'], item['name']))
+            elif item['type'] in {'end group', 'end repeat'} and structure_stack:
+                structure_stack.pop()
+
+        structure_bounds = {}
+        open_structures = []
+        for item in rows:
+            if item['type'] in {'begin group', 'begin repeat'}:
+                open_structures.append(item)
+            elif item['type'] in {'end group', 'end repeat'} and open_structures:
+                begin_item = open_structures.pop()
+                structure_bounds.setdefault(begin_item['name'].lower(), []).append(
+                    (begin_item['position'], item['position']))
+
+        question_prefixes = {
+            'text', 'integer', 'decimal', 'date', 'time', 'datetime',
+            'geopoint', 'geotrace', 'geoshape', 'barcode', 'image', 'audio',
+            'video', 'file', 'range', 'rank', 'select_one', 'select_multiple',
+            'enumerator', 'email', 'acknowledge'}
+
+        def is_question(item):
+            prefix = item['type'].split()[0] if item['type'] else ''
+            return prefix in question_prefixes
+
+        respondent_rows = [item for item in rows if is_question(item)]
+
+        duration_re = re.compile(
+            r'^\s*once\s*\(\s*duration\s*\(\s*\)\s*\)\s*$', re.I)
+        clock_re = re.compile(
+            r'''^\s*once\s*\(\s*format-date-time\s*\(\s*now\s*\(\s*\)'''
+            r'''\s*,\s*(["'])(.+?)\1\s*\)\s*\)\s*$''', re.I | re.S)
+        canonical_clock_re = re.compile(
+            r'''^\s*once\s*\(\s*format-date-time\s*\(\s*now\s*\(\s*\)'''
+            r'''\s*,\s*(["'])%Y-%m-%dT%H:%M:%S\1\s*\)\s*\)\s*$''', re.I)
+
+        def is_duration_checkpoint(item):
+            return (item and item['type'] == 'calculate_here'
+                    and duration_re.match(item['calculation']))
+
+        def is_clock_checkpoint(item, canonical=False):
+            pattern = canonical_clock_re if canonical else clock_re
+            if not item or item['type'] != 'calculate_here':
+                return False
+            match = pattern.match(item['calculation'])
+            if not match or canonical:
+                return bool(match)
+            date_format = match.group(2)
+            has_year = any(token in date_format for token in ('%Y', '%y'))
+            has_month = any(token in date_format for token in ('%m', '%b', '%B', '%j'))
+            has_day = any(token in date_format for token in ('%d', '%e', '%j'))
+            has_time = (any(token in date_format for token in ('%H', '%I'))
+                        and '%M' in date_format)
+            return has_year and has_month and has_day and has_time
+
+        def is_survey_clock(name, boundary):
+            tokens = set(re.split(r'[_\-\s]+', name.lower()))
+            boundary_tokens = {'start', 'begin'} if boundary == 'start' else {'end', 'finish'}
+            return (bool(tokens & {'survey', 'interview'})
+                    and bool(tokens & boundary_tokens)
+                    and bool(tokens & {'time', 'timestamp'}))
+
+        def add_error(message):
+            print(f"  ❌ {message}")
+            self.errors.append(message)
+
+        def add_warning(message):
+            print(f"  ⚠️  {message}")
+            self.warnings.append(message)
+
+        metadata_types = {item['type'] for item in rows}
+        for metadata_type in ('start', 'end'):
+            if metadata_type not in metadata_types:
+                add_error(f"Missing metadata `{metadata_type}` row. Keep the standard "
+                          f"SurveyCTO {metadata_type} metadata as well as timing fields.")
+
+        chosen_clocks = {}
+        for boundary in ('start', 'end'):
+            canonical_name = f'survey_{boundary}_time'
+            candidates = [item for item in rows
+                          if is_survey_clock(item['name'], boundary)]
+            chosen = fields.get(canonical_name)
+            if chosen is None and candidates:
+                chosen = candidates[0]
+            chosen_clocks[boundary] = chosen
+            if chosen is None:
+                add_error(f"Missing survey-level {boundary} timestamp. Add "
+                          f"`{canonical_name}` with calculate_here and "
+                          f"once(format-date-time(now(), ...)).")
+            elif not is_clock_checkpoint(chosen):
+                add_error(f"Row {chosen['excel_row']}: survey-level {boundary} "
+                          f"timestamp '{chosen['name']}' must be a calculate_here "
+                          f"using once(format-date-time(now(), ...)).")
+            elif chosen['group_path'] or chosen['relevance']:
+                add_error(f"Row {chosen['excel_row']}: survey-level {boundary} "
+                          f"timestamp '{chosen['name']}' must be outside all groups "
+                          "and repeats and have no relevance.")
+
+        if respondent_rows:
+            first_question = respondent_rows[0]['position']
+            last_question = respondent_rows[-1]['position']
+            start_clock = chosen_clocks['start']
+            end_clock = chosen_clocks['end']
+            if start_clock is not None and start_clock['position'] >= first_question:
+                add_error(f"Row {start_clock['excel_row']}: survey-level start "
+                          f"timestamp '{start_clock['name']}' must precede the first "
+                          "respondent-input field.")
+            if end_clock is not None and end_clock['position'] <= last_question:
+                add_error(f"Row {end_clock['excel_row']}: survey-level end timestamp "
+                          f"'{end_clock['name']}' must follow the last "
+                          "respondent-input field.")
+
+        canonical_survey_names = (
+            'survey_start_elapsed_sec', 'survey_start_time',
+            'survey_end_elapsed_sec', 'survey_end_time', 'overall_duration_sec')
+        present_survey_names = [name for name in canonical_survey_names if name in fields]
+        canonical_survey_complete = len(present_survey_names) == len(canonical_survey_names)
+        if present_survey_names and not canonical_survey_complete:
+            missing = [name for name in canonical_survey_names if name not in fields]
+            add_error("Incomplete canonical survey timing bundle. Missing: "
+                      + ", ".join(missing) + ".")
+
+        def validate_guarded_duration(item, start_name, end_name):
+            calculation = item['calculation']
+            compact = re.sub(r'\s+', '', calculation.lower())
+            start_ref = f'${{{start_name}}}'.lower()
+            end_ref = f'${{{end_name}}}'.lower()
+            guards_present = (f'string-length({start_ref})' in compact
+                              and f'string-length({end_ref})' in compact)
+            subtraction = f'{end_ref}-{start_ref}' in compact
+            rounded = f'round({end_ref}-{start_ref},0)' in compact
+            blank_fallback = (",'')" in compact or ',"")' in compact)
+            guarded = ('if(' in compact and guards_present and subtraction
+                       and rounded and blank_fallback)
+            if item['type'] != 'calculate' or not guarded:
+                add_error(f"Row {item['excel_row']}: '{item['name']}' must be a "
+                          f"guarded calculate subtracting ${{{start_name}}} from "
+                          f"${{{end_name}}}, with string-length checks for both.")
+
+        if canonical_survey_complete:
+            for name in ('survey_start_elapsed_sec', 'survey_end_elapsed_sec'):
+                item = fields[name]
+                if not is_duration_checkpoint(item):
+                    add_error(f"Row {item['excel_row']}: '{item['name']}' must be a "
+                              f"calculate_here using once(duration()).")
+            for name in ('survey_start_time', 'survey_end_time'):
+                item = fields[name]
+                if not is_clock_checkpoint(item, canonical=True):
+                    add_error(f"Row {item['excel_row']}: '{item['name']}' must be a "
+                              f"calculate_here using "
+                              f"once(format-date-time(now(), "
+                              f"'%Y-%m-%dT%H:%M:%S')).")
+            validate_guarded_duration(
+                fields['overall_duration_sec'], 'survey_start_elapsed_sec',
+                'survey_end_elapsed_sec')
+            positions = [fields[name]['position'] for name in canonical_survey_names]
+            if positions != sorted(positions):
+                add_error("Canonical survey timing fields are out of order. Expected "
+                          + " then ".join(canonical_survey_names) + ".")
+            nested = [name for name in canonical_survey_names
+                      if fields[name]['group_path']]
+            if nested:
+                add_error("Survey-level timing fields must be outside all groups and "
+                          "repeats. Affected fields: " + ", ".join(nested) + ".")
+            relevant = [name for name in canonical_survey_names
+                        if fields[name]['relevance']]
+            if relevant:
+                add_error("Survey-level timing fields must not have relevance. "
+                          "Affected fields: " + ", ".join(relevant) + ".")
+            if respondent_rows:
+                first_question = respondent_rows[0]['position']
+                last_question = respondent_rows[-1]['position']
+                if max(fields[name]['position']
+                       for name in canonical_survey_names[:2]) >= first_question:
+                    add_error("Survey start timing fields must precede the first "
+                              "respondent-input field.")
+                if min(fields[name]['position']
+                       for name in canonical_survey_names[2:]) <= last_question:
+                    add_error("Survey end timing fields and overall duration must "
+                              "follow the last respondent-input field.")
+
+        overall_present = canonical_survey_complete
+        if not overall_present and chosen_clocks['end'] is not None:
+            end_position = chosen_clocks['end']['position']
+            typed_before = [item for item in rows[:end_position] if item['type']]
+            previous = typed_before[-1] if typed_before else None
+            overall_present = bool(previous and is_duration_checkpoint(previous))
+        suffixes = (
+            'start_elapsed_sec', 'start_time', 'end_elapsed_sec',
+            'end_time', 'duration_sec')
+        section_parts = {}
+        suffix_re = re.compile(
+            r'^(.+)_(start_elapsed_sec|start_time|end_elapsed_sec|end_time|duration_sec)$',
+            re.I)
+        for item in rows:
+            match = suffix_re.match(item['name'])
+            if not match:
+                continue
+            slug, suffix = match.group(1).lower(), match.group(2).lower()
+            if slug in {'survey', 'overall'} or item['name'].lower() == 'overall_duration_sec':
+                continue
+            section_parts.setdefault(slug, {})[suffix] = item
+
+        canonical_sections = 0
+        for slug, parts in sorted(section_parts.items()):
+            strong_intent = (
+                'start_elapsed_sec' in parts
+                or 'end_elapsed_sec' in parts
+                or any(parts[suffix]['type'] == 'calculate_here'
+                       for suffix in ('start_time', 'end_time') if suffix in parts))
+            if not strong_intent:
+                continue
+            missing = [f'{slug}_{suffix}' for suffix in suffixes
+                       if suffix not in parts]
+            if missing:
+                add_error(f"Incomplete timing bundle for section '{slug}'. Missing: "
+                          + ", ".join(missing) + ".")
+                continue
+
+            canonical_sections += 1
+            for suffix in ('start_elapsed_sec', 'end_elapsed_sec'):
+                item = parts[suffix]
+                if not is_duration_checkpoint(item):
+                    add_error(f"Row {item['excel_row']}: '{item['name']}' must be a "
+                              f"calculate_here using once(duration()).")
+            for suffix in ('start_time', 'end_time'):
+                item = parts[suffix]
+                if not is_clock_checkpoint(item, canonical=True):
+                    add_error(f"Row {item['excel_row']}: '{item['name']}' must be a "
+                              f"calculate_here using "
+                              f"once(format-date-time(now(), "
+                              f"'%Y-%m-%dT%H:%M:%S')).")
+            validate_guarded_duration(parts['duration_sec'],
+                                      f'{slug}_start_elapsed_sec',
+                                      f'{slug}_end_elapsed_sec')
+            positions = [parts[suffix]['position'] for suffix in suffixes]
+            if positions != sorted(positions):
+                add_error(f"Timing fields for section '{slug}' are out of order. "
+                          "Start checkpoints must precede end checkpoints and duration.")
+            relevances = {parts[suffix]['relevance'] for suffix in suffixes}
+            if len(relevances) > 1:
+                add_error(f"Timing fields for section '{slug}' have inconsistent "
+                          "relevance. Put them in the same section group or give all "
+                          "five fields identical relevance.")
+
+            group_paths = {parts[suffix]['group_path'] for suffix in suffixes}
+            if len(group_paths) > 1:
+                add_error(f"Timing fields for section '{slug}' must share the same "
+                          "group path. Put all five fields inside the section group.")
+            else:
+                section_path = next(iter(group_paths))
+                latest_start = max(parts[suffix]['position'] for suffix in (
+                    'start_elapsed_sec', 'start_time'))
+                earliest_end = min(parts[suffix]['position'] for suffix in (
+                    'end_elapsed_sec', 'end_time', 'duration_sec'))
+                questions_between = [
+                    item for item in respondent_rows
+                    if latest_start < item['position'] < earliest_end]
+                if not questions_between:
+                    add_error(f"Timing fields for section '{slug}' must have at "
+                              "least one respondent-input field between the start "
+                              "and end boundaries.")
+                if (section_path
+                        and section_path[-1][1].lower() == slug):
+                    section_questions = [
+                        item for item in respondent_rows
+                        if item['group_path'][:len(section_path)] == section_path]
+                    if section_questions:
+                        first_question = section_questions[0]['position']
+                        last_question = section_questions[-1]['position']
+                        if latest_start >= first_question or earliest_end <= last_question:
+                            add_error(f"Timing fields for section '{slug}' must bracket "
+                                      "its respondent-input fields: start checkpoints "
+                                      "before the first question and end checkpoints "
+                                      "and duration after the last question.")
+
+        typed_rows = [item for item in rows if item['type']]
+        previous_typed = {item['position']: typed_rows[i - 1] if i else None
+                          for i, item in enumerate(typed_rows)}
+        survey_overall_positions = set()
+        for boundary in ('start', 'end'):
+            chosen = chosen_clocks[boundary]
+            if chosen is not None:
+                previous = previous_typed.get(chosen['position'])
+                if previous and is_duration_checkpoint(previous):
+                    survey_overall_positions.add(previous['position'])
+
+        legacy_parts = {}
+        for item in typed_rows:
+            name = item['name'].lower()
+            if item['type'] != 'calculate_here':
+                continue
+            if name.startswith('duration_'):
+                if item['position'] in survey_overall_positions:
+                    continue
+                legacy_parts.setdefault(name[len('duration_'):], {})['duration'] = item
+            elif name.startswith('time_'):
+                if is_survey_clock(name, 'start') or is_survey_clock(name, 'end'):
+                    continue
+                legacy_parts.setdefault(name[len('time_'):], {})['time'] = item
+
+        legacy_pairs = 0
+        valid_legacy_parts = []
+        typed_positions = {item['position']: i for i, item in enumerate(typed_rows)}
+        for slug, parts in sorted(legacy_parts.items()):
+            missing = [part for part in ('duration', 'time') if part not in parts]
+            if missing:
+                add_error(f"Incomplete legacy timing pair '{slug}'. Missing "
+                          + ", ".join(f'{part}_{slug}' for part in missing) + ".")
+                continue
+            duration_item = parts['duration']
+            time_item = parts['time']
+            valid = True
+            if not is_duration_checkpoint(duration_item):
+                add_error(f"Row {duration_item['excel_row']}: legacy checkpoint "
+                          f"'{duration_item['name']}' must use once(duration()).")
+                valid = False
+            if not is_clock_checkpoint(time_item):
+                add_error(f"Row {time_item['excel_row']}: legacy checkpoint "
+                          f"'{time_item['name']}' must use "
+                          "once(format-date-time(now(), ...)) with a real date and "
+                          "time format.")
+                valid = False
+            duration_typed_position = typed_positions[duration_item['position']]
+            time_typed_position = typed_positions[time_item['position']]
+            if time_typed_position != duration_typed_position + 1:
+                add_error(f"Legacy timing pair '{slug}' must be adjacent and ordered "
+                          "duration first, then timestamp.")
+                valid = False
+            if duration_item['relevance'] != time_item['relevance']:
+                add_error(f"Rows {duration_item['excel_row']}-{time_item['excel_row']}: "
+                          f"legacy timing pair '{duration_item['name']}'/"
+                          f"'{time_item['name']}' has inconsistent relevance.")
+                valid = False
+            matching_structures = structure_bounds.get(slug, [])
+            if matching_structures:
+                if not any(end_position < duration_item['position']
+                           for _, end_position in matching_structures):
+                    add_error(f"Legacy timing pair '{slug}' must appear after the "
+                              "matching group or repeat ends.")
+                    valid = False
+            elif not any(item['position'] < duration_item['position']
+                         for item in respondent_rows):
+                add_error(f"Legacy timing pair '{slug}' appears before every "
+                          "respondent-input field and cannot time a completed section.")
+                valid = False
+            if valid:
+                legacy_pairs += 1
+                valid_legacy_parts.append(parts)
+
+        if not overall_present and chosen_clocks['end'] is not None:
+            end_position = chosen_clocks['end']['position']
+            for parts in valid_legacy_parts:
+                duration_item = parts['duration']
+                time_item = parts['time']
+                if not (is_duration_checkpoint(duration_item)
+                        and is_clock_checkpoint(time_item)
+                        and time_item['position'] < end_position):
+                    continue
+                later_questions = [
+                    item for item in respondent_rows
+                    if time_item['position'] < item['position'] < end_position]
+                if not later_questions:
+                    overall_present = True
+                    break
+
+        if not overall_present:
+            add_error("Missing overall duration. Use the canonical guarded "
+                      "`overall_duration_sec`; an established K2 form may instead "
+                      "use its final complete cumulative duration/timestamp pair, "
+                      "provided no respondent-input fields follow it.")
+
+        question_count = 0
+        candidate_groups = 0
+        group_stack = []
+        for item in rows:
+            if item['type'] == 'begin group':
+                group_stack.append({'appearance': item['appearance'], 'questions': 0})
+                continue
+            if item['type'] == 'end group':
+                if group_stack:
+                    group = group_stack.pop()
+                    if ('field-list' not in group['appearance']
+                            and group['questions'] >= 3):
+                        candidate_groups += 1
+                continue
+            if is_question(item):
+                question_count += 1
+                if group_stack:
+                    group_stack[-1]['questions'] += 1
+
+        timing_units = canonical_sections + legacy_pairs
+        expected_units = 0
+        if question_count:
+            expected_units = max(
+                1, (question_count + 39) // 40, (candidate_groups + 1) // 2)
+
+        if question_count and timing_units == 0:
+            add_error(f"No section timing was found for {question_count} question "
+                      "fields. Add a canonical timing bundle to every substantive "
+                      "section, or complete the established K2 checkpoint pairs.")
+        elif timing_units < expected_units:
+            add_warning(
+                f"Sparse section timing coverage: found {timing_units} timing unit"
+                f"{'s' if timing_units != 1 else ''}; expected at least "
+                f"{expected_units} for {question_count} question fields and "
+                f"{candidate_groups} substantive-group candidates. The heuristic "
+                "uses one unit per 40 questions or one per two candidate groups, "
+                "whichever is larger. Review the timing inventory; technical and "
+                "field-list groups do not need their own timers.")
+
+        if not self.errors and not self.warnings:
+            print(f"  ✅ Survey boundaries and {timing_units} section timing "
+                  f"unit{'s' if timing_units != 1 else ''} look complete")
+        return not self.errors
+
     def _col(self, df, name):
         """Case-insensitive column lookup; also tolerates space/underscore."""
         want = name.lower().replace('_', ' ')
@@ -1996,6 +2469,7 @@ class SurveyCTOChecker:
         results.append(self.check_choice_lists())
         results.append(self.check_dynamic_choice_labels())
         results.append(self.check_end_metadata_arithmetic())
+        results.append(self.check_timing_instrumentation())
         results.append(self.check_other_specify_fields())
         results.append(self.check_select_multiple_other())
         results.append(self.check_select_multiple_exclusive())
@@ -2041,17 +2515,21 @@ class SurveyCTOChecker:
 
 def main():
     """Main entry point."""
-    if len(sys.argv) > 1:
-        file_path = sys.argv[1]
-    else:
-        file_path = "ai_health_pilot_baseline.xlsx"
+    parser = argparse.ArgumentParser(description="Validate an XLSForm questionnaire")
+    parser.add_argument('file_path', nargs='?', default='ai_health_pilot_baseline.xlsx')
+    parser.add_argument('--platform', choices=('surveycto', 'odk', 'kobo'),
+                        default='surveycto',
+                        help='target platform; SurveyCTO enables calculate_here timing checks')
+    args = parser.parse_args()
+    file_path = args.file_path
+    if len(sys.argv) == 1:
         print(f"No file specified, using default: {file_path}")
 
     if not Path(file_path).exists():
         print(f"Error: File not found: {file_path}")
         sys.exit(1)
 
-    checker = SurveyCTOChecker(file_path)
+    checker = SurveyCTOChecker(file_path, platform=args.platform)
     success = checker.run_all_checks()
 
     sys.exit(0 if success else 1)
