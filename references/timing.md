@@ -92,6 +92,8 @@ calculate_here   | time_health            | once(format-date-time(now(), '%Y-%b-
 
 The `duration_*` value is cumulative seconds since the form began, not the duration of that section. Existing K2 analysis subtracts consecutive checkpoints in export order. This compatibility alternative takes precedence over the canonical five-field rule whenever an existing form or cross-wave pipeline depends on it. Add missing K2 coverage in the same convention, and preserve the existing relevance semantics for both members of each pair. Use the self-contained canonical pattern for new forms because it does not depend on the preceding section, export column order, or an unskipped prior checkpoint.
 
+Some deployed K2 forms declare the standard `end` metadata near the top of the survey sheet. SurveyCTO still stamps it at finalisation, so preserve that established row placement; do not move metadata merely to make its declaration appear beside the final timing rows.
+
 For the checker to treat the final K2 cumulative pair as overall duration coverage, it must be complete and no respondent-input field may follow it before the survey end timestamp. An earlier section pair does not replace overall timing when later questions remain.
 
 ## Optional field-level audit
