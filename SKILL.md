@@ -1,6 +1,6 @@
 ---
 name: surveycto-questionnaire
-description: "Create, edit, validate, inspect, convert, and upload XLSForm surveys for SurveyCTO, ODK, or Kobo. Supports both .xlsx files and Google Sheets — for gsheet-backed forms, reads via auto-export to a temp xlsx and writes directly to the sheet via the Sheets API."
+description: "Create, edit, validate, inspect, convert, and upload XLSForm surveys for SurveyCTO, ODK, or Kobo in .xlsx or Google Sheets. Reads Sheet-backed forms by temporary xlsx export and writes through the Sheets API."
 ---
 # XLSForm Survey Design and Excel Editing
 
@@ -448,6 +448,7 @@ The template (vendored from the official SurveyCTO skill) ships with the exact S
 
 - The template's version formula is `=TEXT(YEAR(NOW())-2000, "00") & ...` — this project's convention adds a `+2` year offset (`YEAR(NOW())-2000+2`) to stay lexically greater than legacy versions. Fine for a brand-new form either way; apply the `+2` variant when consistency with this project's other forms matters.
 - Set `form_title`/`form_id` in settings row 2 (`default_language` is `english`).
+- For a SurveyCTO-targeted form, add the mandatory section-timing rows described in [Section timing and timestamps](references/timing.md) as the questionnaire structure is built. In a new form, every substantive section needs start and end checkpoints, a guarded duration, and wall-clock timestamps; the form needs the same paired pattern for overall interview timing.
 - When form B derives from an existing form A, the build-script pattern below (copy the project's own form, not the template) is the right move.
 
 ### Deriving a New Form from an Existing One (build-script pattern)
@@ -554,6 +555,29 @@ gender    | female | Female
 - `instance_name` - Display format: `concat(${name}, ' - ', ${date})`
 
 ## Common Patterns
+
+### Mandatory section timing and timestamps
+
+Every SurveyCTO-targeted survey this skill creates, converts, or edits must have documented timing coverage for each substantive section. Read [Section timing and timestamps](references/timing.md) before building or revising the questionnaire structure. Use its canonical five-field pattern for new and undeployed SurveyCTO forms.
+
+`calculate_here` is SurveyCTO-specific. Do not insert the canonical pattern into a form that must remain compatible with ODK or Kobo. Use a timing pattern verified for the target platform, or ask which compatibility target governs before adding timing fields.
+
+Before changing an existing form, determine whether it is deployed, whether it has submissions, which timing convention it already uses, and whether downstream code depends on that convention. For a deployed form, never make timing a silent side effect of an unrelated edit. Keep additions within existing group paths, preserve established field names and conventions, and disclose the schema expansion in the plan and recap. If downstream expectations are unknown, ask before adding fields. Existing K2 forms whose analysis uses cumulative checkpoints follow the compatibility pattern in the reference rather than the canonical five-field pattern.
+
+The default is five hidden fields inside each section group:
+
+- a start checkpoint using `calculate_here` with `once(duration())`;
+- a start wall-clock timestamp using `calculate_here` with `once(format-date-time(now(), '%Y-%m-%dT%H:%M:%S'))`;
+- an end checkpoint and end wall-clock timestamp using the same expressions;
+- a guarded `calculate` field for section duration in seconds.
+
+Place the start rows immediately after `begin group` and the end rows immediately before the matching `end group`. This makes all timing fields inherit the section's relevance, so a skipped section stays blank. Use literal, descriptive names such as `health_start_elapsed_sec`, `health_start_time`, `health_end_elapsed_sec`, `health_end_time`, and `health_duration_sec`. Do not use Excel formulas to generate timing-field names.
+
+Every new form also needs `survey_start_elapsed_sec` and `survey_start_time` near the start of the interview, plus `survey_end_elapsed_sec`, `survey_end_time`, and a guarded `overall_duration_sec` on the last active rows before the `end` metadata field. Keep all five fields outside section groups and without relevance. This records refusals and shortened interviews as well as completed ones. Never calculate interview duration from the `end` metadata field; it is stamped only at finalisation and the resulting plain calculation exports empty.
+
+Do not time every technical wrapper or `field-list` group. A section is a substantive interview module that analysts may want to assess separately, or a module with its own skip logic. Use one non-overlapping analytical module level by default; time both a parent and nested child only when their totals answer distinct questions. If a section contains repeats, time the enclosing section once; add timers inside the repeat only when per-instance duration is an explicit requirement.
+
+**Finish condition:** before declaring questionnaire work complete, report the timing inventory. Every substantive section must have the canonical pattern or a documented compatibility exception, and survey-level start/end timing must be present.
 
 ### Skip Logic
 
@@ -1120,7 +1144,7 @@ When authoring or debugging a `.fieldplugin.zip`, read [`references/field-plugin
 
 ## Converting Forms from Other Platforms
 
-Converting a Kobo/ODK XLSForm, CommCare XForms XML, or Qualtrics `.qsf` export into a SurveyCTO form: read [`references/form-conversion.md`](references/form-conversion.md) first (workflow contract: read source with your own tooling, plan the full mapping, convert onto a template copy, write a conversion report next to the output), then the platform reference (`form-conversion-kobo.md`, `-odk.md`, `-commcare.md`, `-qualtrics.md`). Highest-value rules: Kobo `begin_kobomatrix`/`kobo--*` tokens are rejected outright (expand matrices into `field-list` groups); ODK forms sometimes put the default language only in `label::English` leaving `label` empty, which silently breaks the form.
+Converting a Kobo/ODK XLSForm, CommCare XForms XML, or Qualtrics `.qsf` export into a SurveyCTO form: read [`references/form-conversion.md`](references/form-conversion.md) first (workflow contract: read source with your own tooling, plan the full mapping, convert onto a template copy, write a conversion report next to the output), then the platform reference (`form-conversion-kobo.md`, `-odk.md`, `-commcare.md`, `-qualtrics.md`). Add the mandatory [section timing and timestamps](references/timing.md) even when the source form omitted them. Highest-value rules: Kobo `begin_kobomatrix`/`kobo--*` tokens are rejected outright (expand matrices into `field-list` groups); ODK forms sometimes put the default language only in `label::English` leaving `label` empty, which silently breaks the form.
 
 ## Resources
 
@@ -1136,6 +1160,7 @@ Converting a Kobo/ODK XLSForm, CommCare XForms XML, or Qualtrics `.qsf` export i
 - [`references/xlsform.md`](references/xlsform.md) — exact column spellings (`constraint message` with a space, `choice_filter` with an underscore), ALL field types incl. SurveyCTO-specific ones (`enumerator`, `text audit`, `audio audit`, `speed violations *`, `sensor_*`, `calculate_here`, `comments`), the full appearance catalog, settings columns, choices ordering rules, template anatomy.
 - [`references/expressions.md`](references/expressions.md) — full function tables with signatures, SurveyCTO-vs-ODK divergence table, worked patterns (age-from-DOB, search(), randomization), pitfalls table, debugging checklist.
 - [`references/translation.md`](references/translation.md) — translation workflows (see Multi-language Surveys above).
+- [`references/timing.md`](references/timing.md) — mandatory per-section start/end checkpoints, wall-clock timestamps, guarded duration calculations, overall duration, skipped sections, and repeats.
 - [`references/field-plugins.md`](references/field-plugins.md) — plug-in form API, manifest, packaging, testing (see Field Plug-ins above).
 - [`references/datasets-xml.md`](references/datasets-xml.md) + [`references/dataset-validation.md`](references/dataset-validation.md) — dataset definition XML (see the server-datasets section).
 - [`references/form-conversion.md`](references/form-conversion.md) + platform variants — form conversion (see above).
@@ -1193,7 +1218,8 @@ When working with surveys:
 3. **Adding logic:** Clarify conditions and affected questions
 4. **Translations:** Ask which languages needed
 5. **Bulk operations:** Use pandas for efficiency
-6. **Testing:** Validate after changes
+6. **Timing:** For SurveyCTO forms, instrument every substantive section and the overall form using [`references/timing.md`](references/timing.md); verify a platform-supported alternative for ODK/Kobo forms
+7. **Testing:** Validate after changes
 
 Always explain modifications so users understand XLSForm structure.
 
@@ -1204,7 +1230,7 @@ Pattern for one form to prefill from another form's submissions (e.g. transport-
 - **Publish form → dataset:** Design tab → create server dataset → "Publish into" the source form → "Add all" → set **unique ID = the key field** (gives update-or-insert). Attach the dataset to each consuming form. There is a **~5–10 min refresh lag** before the attached CSV regenerates (+ device sync) — just-collected rows won't appear instantly.
 - **Prefill a value:** `pulldata('dataset','col','keycol',${key})` (returns `''` on no match — guard with `string-length(...) = 0`).
 - **Roster picker from a dataset, filtered:** `select_one/multiple <list>` with `appearance: search('dataset','matches','<filtercol>',${field})`. The choices sheet needs ONE placeholder row whose `value` cell = the dataset column to STORE and `label` cell = comma-separated columns to DISPLAY (e.g. `d4_name,d5b_age`). `search()` works identically on a published server dataset or a static `.csv` (source = dataset id / filename-without-.csv). **Those cells name COLUMNS, in every language column** — never wrap a translation in `<i>`/`<span>` or the first and last comma-separated tokens stop matching and the picker renders blank in that language only (Aug 2026: an `<i>`-wrapped Bengali label reduced a three-column case picker to one, so enumerators could not tell two same-ID people apart). `surveycto_checker.py` now errors on this.
-- **Interview duration: `calculate_here` + `once(duration())`, never a plain calculate over `${end_time}`.** The `end` metadata field is stamped at finalisation and plain `calculate` fields are NOT re-evaluated then, so `round((decimal-date-time(${end_time}) - decimal-date-time(${start_time})) * 86400, 0)` exports EMPTY (confirmed against real submissions, Aug 2026). Put a `calculate_here` running `once(duration())` on the form's LAST row, outside every group so refusals still record a length. Section timers = two `calculate_here` marks subtracted, but guard the subtraction with `string-length(...) > 0` on both: a section the respondent never reached leaves both empty, and empty minus empty is `NaN` in JavaRosa, which exports as the literal string. Add a `text audit` field (appearance `eventlog`) for per-field timing; section timers give module totals but cannot locate a slow item inside a module. Checker flags the plain-calculate case.
+- **Interview duration and section timing:** follow the mandatory pattern in [`references/timing.md`](references/timing.md). Use `calculate_here` checkpoints and guarded subtraction, never a plain calculation over the `end` metadata field. The checker flags the latter because it exports empty.
 - **Filter-key values must be unique across rounds/waves.** The dataset accumulates ALL rounds' records, so reusing a choice code (e.g. village `v01` in round 1 AND round 2) makes `search()` surface the earlier round's records in the new round's roster (transport round 2, Aug 2026: Bhumlawas showed round-1 Kalimagri patients). Assign fresh codes each round (v06, v07, …) or add a round column to the filter.
 - **Server read endpoints that work with the keychain session** (from `surveycto_upload.load_session(server, username, auth_mode='keychain')`): `GET /formList` returns every LIVE form id + deployed version (the reliable way to confirm what a deploy actually landed), and `GET /api/v1/forms/data/wide/csv/{formId}` returns submissions as CSV (HTTP 204 = zero submissions — useful before a breaking change). `/api/v2/...` 404s and `/console/forms-groups-datasets/get` returns 403/500 even with a CSRF token; don't burn time on them.
 - **Dataset attachments in `deployedGroupFiles.mediaFiles` have server-relative `downloadLink`s** (`/forms/{id}/dataset-attachment/...`) unlike regular media files' absolute URLs — prepend `https://{server}` before fetching.

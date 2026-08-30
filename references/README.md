@@ -1,6 +1,6 @@
 # References
 
-`randomization-patterns.md` and `form-patterns.md` are home-grown (RCT randomization recipes and general form-design patterns for this skill).
+`randomization-patterns.md`, `form-patterns.md`, and `timing.md` are home-grown (RCT randomization recipes, general form-design patterns, and the cross-project timing convention for this skill).
 
 Everything else in this directory, plus the sibling `assets/` directory (XLSForm template,
 field-plugin test harness and template, dataset validator, CommCare loader), is vendored from
