@@ -1265,11 +1265,17 @@ Pattern for one form to prefill from another form's submissions (e.g. transport-
   auth, API-enabled role). The `wide/csv` route WITHOUT a `date` parameter
   returns 404 even for forms that exist — indistinguishable from a missing
   form or a permission problem, so don't diagnose from the 404 alone.
-- **417 = "export still being prepared", not an error.** First-ever API pulls
-  and pulls right after new submissions 417 while the server builds the
-  export; retry after ~15s (a few attempts) or keep exports warm with a
-  periodic sync. Persistent 417 can also mean an encrypted form with no
-  publishable fields.
+- **417 is a per-form rate limit, not "export being prepared".** The body says
+  `{"error":{"code":417,"message":"Please wait for N seconds before retrying to pull
+  all submissions for this form."}}`: SurveyCTO allows ONE full-history pull
+  (`?date=0`) per form per 300 s (plus 30 API requests/min/server). Parse the
+  wait from the body and do not touch that form again until it elapses; every
+  early retry re-collides with the window (a 5×15 s retry loop guaranteed
+  failure and kept the MRD baseline forms at 0 successful pulls in ~4,000 cron
+  runs, Aug-Sep 2026). Several pullers on one form (cron + a console "Sync now"
+  button + an R script) share the same window — coordinate through stored
+  per-form "last pulled / wait until" state. A truly persistent 417 with no
+  wait message can also mean an encrypted form with no publishable fields.
 - The JSON export renders `SubmissionDate` as "Aug 4, 2026 6:56:56 PM"
   (server time, UTC on kilongajfl) — normalize before comparing to ISO dates.
 - Real (non-test) submissions can be created headlessly via OpenRosa: fetch
@@ -1277,12 +1283,6 @@ Pattern for one form to prefill from another form's submissions (e.g. transport-
   attribute, then POST multipart `xml_submission_file` to `/submission` with
   an instance XML naming that id+version — returns 201. Console "Test" view
   submissions do NOT reach the data API.
-- **417 "Please wait N seconds": full-history pulls (`?date=0`) are
-  rate-limited per form (~15 min window).** Every early retry collides with
-  the window again, so a tight retry loop (or several agents polling the same
-  form) keeps the export perpetually "preparing". Stop touching the endpoint
-  for the full stated wait; a scheduled sync will land it on a later run.
-  Redeploying a form invalidates the export cache and restarts the cycle.
 - **Deleting specific submissions:** Monitor tab → the form's "Purge form
   data" → "Purge specific submissions" → paste the `KEY` value(s)
   (comma-separated). "Purge by date" is the other, dangerous branch — never
