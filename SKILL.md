@@ -1265,17 +1265,23 @@ Pattern for one form to prefill from another form's submissions (e.g. transport-
   auth, API-enabled role). The `wide/csv` route WITHOUT a `date` parameter
   returns 404 even for forms that exist — indistinguishable from a missing
   form or a permission problem, so don't diagnose from the 404 alone.
-- **417 is a per-form rate limit, not "export being prepared".** The body says
+- **417 is a rate limit, not "export being prepared".** The body says
   `{"error":{"code":417,"message":"Please wait for N seconds before retrying to pull
   all submissions for this form."}}`: SurveyCTO allows ONE full-history pull
-  (`?date=0`) per form per 300 s (plus 30 API requests/min/server). Parse the
-  wait from the body and do not touch that form again until it elapses; every
-  early retry re-collides with the window (a 5×15 s retry loop guaranteed
-  failure and kept the MRD baseline forms at 0 successful pulls in ~4,000 cron
-  runs, Aug-Sep 2026). Several pullers on one form (cron + a console "Sync now"
-  button + an R script) share the same window — coordinate through stored
-  per-form "last pulled / wait until" state. A truly persistent 417 with no
-  wait message can also mean an encrypted form with no publishable fields.
+  (`?date=0`) per 300 s **for the whole server, shared by every form** — despite
+  the wording "this form", one successful pull is followed at once by "wait 300
+  seconds" for any other form (verified live 2026-09-02) — plus 30 API
+  requests/min/server. Parse the wait from the body and make no full pull until
+  it elapses; every early retry re-collides with the window (a 5×15 s retry
+  loop guaranteed failure and kept the MRD baseline forms at 0 successful pulls
+  in ~4,000 cron runs, Aug-Sep 2026). With N forms, pull ONE per run, oldest
+  first, on a cron slower than the window (6 min: a 5-min cron fired seconds
+  before the window reopened and wasted every other run); all pullers (cron +
+  a console "Sync now" button + an R script) share that one window, so
+  coordinate through stored "last pulled / wait until" state. Incremental
+  `date=<timestamp>` pulls are the documented way around the limit. A truly
+  persistent 417 with no wait message can also mean an encrypted form with no
+  publishable fields.
 - The JSON export renders `SubmissionDate` as "Aug 4, 2026 6:56:56 PM"
   (server time, UTC on kilongajfl) — normalize before comparing to ISO dates.
 - Real (non-test) submissions can be created headlessly via OpenRosa: fetch
