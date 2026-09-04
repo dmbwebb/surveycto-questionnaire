@@ -572,7 +572,7 @@ Before changing an existing form, determine whether it is deployed, whether it h
 
 The default is five hidden fields inside each section group:
 
-- a start checkpoint using `calculate_here` with `once(duration())` — place the two survey-start rows before the `audio audit` row (right after the `duration` calculate): the checker treats `audio audit` as respondent input and rejects a start timestamp that comes after it;
+- a start checkpoint using `calculate_here` with `once(duration())` — place the two survey-start rows before the `audio audit` row (right after the `duration` calculate): the checker treats `audio audit` as respondent input and rejects a start timestamp that comes after it. One whole-survey audio audit is a data-loss risk, because SurveyCTO does not resume a recording after Edit Saved Form: on a long form, split it into one field-anchored audit per section, see [Audio audits: segment long recordings](references/form-patterns.md#audio-audits-segment-long-recordings);
 - a start wall-clock timestamp using `calculate_here` with `once(format-date-time(now(), '%Y-%m-%dT%H:%M:%S'))`;
 - an end checkpoint and end wall-clock timestamp using the same expressions;
 - a guarded `calculate` field for section duration in seconds.

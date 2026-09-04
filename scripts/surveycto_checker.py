@@ -10,6 +10,9 @@ Validates XLSForm files for common errors:
 - Markup in dynamic search() choice rows (silently blanks the picker in that language)
 - Plain calculate over the `end` metadata field (never populates; use calculate_here)
 - Missing or malformed survey-level and section timing instrumentation
+- Audio audit anchors that name a missing, invisible or in-repeat field, or use ${} syntax
+- Audio audits placed inside a repeat group
+- Single whole-survey audio audits, which record nothing after Edit Saved Form
 - Implausibly sparse section timing coverage for the questionnaire's size
 - Missing required columns
 - Typos in field names and labels
@@ -59,6 +62,28 @@ class SurveyCTOChecker:
         'constraint_message', 'required', 'required message',
         'read only', 'repeat_count', 'choice_filter', 'default'
     )
+    # Field types SurveyCTO puts on screen. Audio-audit start/end anchors must
+    # name one of these: calculate, calculate_here, metadata rows and group
+    # boundaries are not visible fields and silently break the audit.
+    VISIBLE_FIELD_TYPES = (
+        'text', 'integer', 'decimal', 'date', 'time', 'datetime', 'geopoint',
+        'geotrace', 'geoshape', 'barcode', 'image', 'audio', 'video', 'file',
+        'range', 'rank', 'note', 'comments', 'trigger', 'acknowledge', 'email',
+        'enumerator', 'select_one', 'select_multiple',
+        'select_one_from_file', 'select_multiple_from_file',
+    )
+    # Multi-word invisible types whose first token collides with a visible type
+    # ('audio audit' would otherwise read as 'audio').
+    INVISIBLE_MULTIWORD_TYPES = (
+        'audio audit', 'text audit', 'speed violations audit',
+        'speed violations count',
+    )
+    # Above this share of the form's visible fields, a single audio audit is
+    # effectively a whole-survey recording.
+    AUDIO_AUDIT_MAX_SPAN_SHARE = 0.5
+    # Above this many seconds, a single time-based audit is effectively a
+    # whole-survey recording.
+    AUDIO_AUDIT_MAX_DURATION_SEC = 900
 
     def __init__(self, file_path, platform='surveycto'):
         self.file_path = Path(file_path)
@@ -2439,6 +2464,189 @@ class SurveyCTOChecker:
                   f"unit{'s' if timing_units != 1 else ''} look complete")
         return not self.errors
 
+    def _is_visible_field_type(self, norm_type):
+        """True when a normalised type string is a field SurveyCTO shows on screen."""
+        if not norm_type or norm_type in self.INVISIBLE_MULTIWORD_TYPES:
+            return False
+        prefix = norm_type.split()[0]
+        return prefix in self.VISIBLE_FIELD_TYPES
+
+    def check_audio_audits(self):
+        """Validate `audio audit` anchors, placement and span.
+
+        SurveyCTO does not resume an audio audit when a partially completed
+        form is reopened with Edit Saved Form. A single whole-survey audit
+        anchored at consent therefore records nothing for any interview the
+        enumerator parks and resumes. Measured on three long AI Health baseline
+        forms (3 Sep 2026): 23 to 45 percent of consenting interviews had no
+        recording at all, and 97 to 100 percent of those showed more than five
+        minutes of wall-clock time unexplained by active form time. Short forms
+        of 4 to 16 minutes captured 100 percent. The fix is to split a long
+        form into several field-anchored segments, one per section: see
+        references/form-patterns.md, "Audio audits: segment long recordings".
+
+        Also enforces the documented anchor restrictions: anchors must be
+        visible fields named bare (no ${...}), neither the anchors nor the
+        audit row itself may sit inside a repeat group.
+        """
+        print("\n=== Checking Audio Audits ===")
+        if self.survey_df is None:
+            return True
+        type_col = self._col(self.survey_df, 'type')
+        name_col = self._col(self.survey_df, 'name')
+        app_col = self._col(self.survey_df, 'appearance')
+        if type_col is None or name_col is None:
+            return True
+
+        def cell(value):
+            if value is None or pd.isna(value):
+                return ''
+            return str(value).strip()
+
+        rows = []
+        fields = {}
+        repeat_depth = 0
+        for position, (idx, row) in enumerate(self.survey_df.iterrows()):
+            norm_type = ' '.join(cell(row.get(type_col)).lower().split())
+            if norm_type == 'end repeat' and repeat_depth:
+                repeat_depth -= 1
+            item = {
+                'position': position,
+                'excel_row': idx + 2,
+                'type': norm_type,
+                'name': cell(row.get(name_col)),
+                'appearance': cell(row.get(app_col)) if app_col else '',
+                'in_repeat': repeat_depth > 0,
+                'visible': self._is_visible_field_type(norm_type),
+            }
+            if norm_type == 'begin repeat':
+                repeat_depth += 1
+            rows.append(item)
+            if item['name']:
+                fields.setdefault(item['name'].lower(), item)
+
+        audits = [item for item in rows if item['type'] == 'audio audit']
+        if not audits:
+            print("  ℹ️  No audio audit field")
+            return True
+
+        ok = True
+
+        def add_error(message):
+            nonlocal ok
+            ok = False
+            print(f"  ❌ {message}")
+            self.errors.append(message)
+
+        def add_warning(message):
+            print(f"  ⚠️  {message}")
+            self.warnings.append(message)
+
+        param_re = re.compile(r'^([A-Za-z]+)\s*=\s*(.*)$')
+        time_value_re = re.compile(r'^\d+(\s*-\s*\d+)?$')
+        reference_re = re.compile(r'^\$\{(.+?)\}$')
+
+        for audit in audits:
+            label = f"Row {audit['excel_row']}: audio audit '{audit['name']}'"
+            if audit['in_repeat']:
+                add_error(f"{label} sits inside a repeat group. An audio audit "
+                          f"does not function inside a repeat. Move the row to "
+                          f"the top level of the survey.")
+
+            params = {}
+            for chunk in audit['appearance'].split(';'):
+                chunk = chunk.strip()
+                if not chunk:
+                    continue
+                match = param_re.match(chunk)
+                if match:
+                    params[match.group(1).lower()] = match.group(2).strip()
+            audit['params'] = params
+
+            if '${' in audit['appearance']:
+                add_error(f"{label} uses ${{...}} syntax in its appearance: "
+                          f"{audit['appearance']!r}. Audio-audit anchors take the "
+                          f"bare field name, e.g. s=audio_consent;d=gps.")
+
+            anchors = {}
+            field_anchor_keys = set()
+            for key in ('s', 'd'):
+                value = params.get(key)
+                if value is None or time_value_re.match(value):
+                    continue
+                field_anchor_keys.add(key)
+                match = reference_re.match(value)
+                reference = match.group(1).strip() if match else value
+                target = fields.get(reference.lower())
+                if target is None:
+                    add_error(f"{label} anchors {key}={value} on field "
+                              f"'{reference}', which does not exist in the survey.")
+                elif not target['visible']:
+                    add_error(f"{label} anchors {key}={value} on '{reference}', "
+                              f"a `{target['type']}` row. Anchors must be visible "
+                              f"fields: calculate, calculate_here and group "
+                              f"boundaries do not work.")
+                elif target['in_repeat']:
+                    add_error(f"{label} anchors {key}={value} on '{reference}', "
+                              f"which sits inside a repeat group. Audio-audit "
+                              f"anchors cannot be inside a repeat.")
+                else:
+                    anchors[key] = target
+            audit['anchors'] = anchors
+            audit['field_anchor_keys'] = field_anchor_keys
+
+            if 'p' in params and field_anchor_keys:
+                keys = ', '.join(f"{k}=" for k in ('s', 'd')
+                                 if k in field_anchor_keys)
+                add_warning(f"{label} combines p={params['p']} with a "
+                            f"field-anchored {keys}. Mutual exclusion applies to "
+                            f"time-based (`p=`) audits: at most one fires per "
+                            f"submission, and a p=100 audit blocks every other "
+                            f"time-based audit. Drop `p=` so the row is "
+                            f"unambiguously question-based. Question-based audits "
+                            f"are not mutually exclusive, so every segment fires.")
+
+        visible_positions = [item['position'] for item in rows if item['visible']]
+        if len(audits) == 1 and visible_positions:
+            audit = audits[0]
+            params = audit['params']
+            anchors = audit['anchors']
+            resume_note = (
+                "SurveyCTO does not resume an audio audit after a form is "
+                "reopened with Edit Saved Form, so an interview the enumerator "
+                "parks and resumes records nothing. On three long AI Health "
+                "baseline forms this lost 23 to 45 percent of interviews. Split "
+                "the form into several field-anchored segments, one per section "
+                "(see references/form-patterns.md, \"Audio audits: segment long "
+                "recordings\").")
+            if audit['field_anchor_keys'] <= set(anchors) and audit['field_anchor_keys']:
+                start_position = anchors['s']['position'] if 's' in anchors else -1
+                end_position = (anchors['d']['position'] if 'd' in anchors
+                                else rows[-1]['position'])
+                span = [p for p in visible_positions
+                        if start_position <= p <= end_position]
+                share = len(span) / len(visible_positions)
+                if share > self.AUDIO_AUDIT_MAX_SPAN_SHARE:
+                    add_warning(
+                        f"Row {audit['excel_row']}: audio audit "
+                        f"'{audit['name']}' is the form's only audio audit and "
+                        f"spans {len(span)} of {len(visible_positions)} visible "
+                        f"fields ({share:.0%}). {resume_note}")
+            elif not audit['field_anchor_keys']:
+                duration = params.get('d', '')
+                if (re.fullmatch(r'\d+', duration)
+                        and int(duration) > self.AUDIO_AUDIT_MAX_DURATION_SEC):
+                    add_warning(
+                        f"Row {audit['excel_row']}: audio audit "
+                        f"'{audit['name']}' is the form's only audio audit and "
+                        f"records d={duration} seconds in one stretch. "
+                        f"{resume_note}")
+
+        if ok:
+            print(f"  ✅ {len(audits)} audio audit row(s) have valid anchors "
+                  f"and placement")
+        return ok
+
     def _col(self, df, name):
         """Case-insensitive column lookup; also tolerates space/underscore."""
         want = name.lower().replace('_', ' ')
@@ -2470,6 +2678,7 @@ class SurveyCTOChecker:
         results.append(self.check_dynamic_choice_labels())
         results.append(self.check_end_metadata_arithmetic())
         results.append(self.check_timing_instrumentation())
+        results.append(self.check_audio_audits())
         results.append(self.check_other_specify_fields())
         results.append(self.check_select_multiple_other())
         results.append(self.check_select_multiple_exclusive())
