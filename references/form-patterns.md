@@ -99,6 +99,24 @@ A three-segment example, with all the audit rows sitting together near the top o
 - Anchors must be **visible** fields. A `calculate`, a `calculate_here`, a `begin group` row or a metadata row silently breaks the audit.
 - Anchors cannot sit inside a repeat group, and an `audio audit` field does not function inside a repeat group either.
 - Write the bare field name in the appearance. `s=${audio_consent}` is wrong; `s=audio_consent` is right.
+- Check the anchors against the form's **current field order**, not the section order in your head. A segment whose `d=` anchor sits earlier in the form than its `s=` anchor never reaches its stop and records to finalisation, and the next segment starts too early. This bites when a module is moved: an AI Health main-study draft moved the tracking block into the screening wait, so `track_next_2weeks` ended up before `screening_completed` and two segments silently lost their intended boundaries. Re-derive the anchor list whenever field order changes.
+- Do not make a field **immediately after a hand-off to an external app** the START of a segment — see below.
+
+### Starts fail after an external app hand-off
+
+A running audio audit survives the app going to the background, but **starting a new one in the seconds after Collect returns to the foreground often fails**, and the failure is device-specific. Android restricts microphone capture for an app that has just been backgrounded; an already-open recorder keeps the mic, a new one is refused.
+
+This matters for any form that launches an external app mid-interview — a field plug-in that opens a browser, a separate data-collection app, a payment screen — because the obvious anchor for the next section is the first field the enumerator sees on return, which is exactly the fragile moment.
+
+Measured on the AI Health planning/information baseline, first 27 submissions after segmentation (9 September 2026). The segment starting at the first screen after the Chrome screening PWA was missing in 11 of 27 and truncated to well under a minute in most of the rest, while every other segment recorded in every submission and the segment spanning the whole Chrome excursion recorded normally. By device: 8 of 9 on one tablet, 2 of 8 and 1 of 10 on the others.
+
+Three ways out, cheapest first:
+
+1. **Do not start a segment there.** Extend the segment that began *before* the hand-off so it runs through the block after the return. It is already recording, so nothing has to start at the fragile moment. Cost: a pause mid-excursion now loses both sections instead of one.
+2. **Add a redundant, later-starting segment** over the same stretch. Field-anchored audits are not mutually exclusive and may overlap, so keep the original segment and add a second one anchored on a screen the enumerator reaches a minute or two later, once the app has been foreground for a while. Pick an anchor on the same path gate as the original start, or give the extra audit the anchor's own relevance. The export gains an overlapping column, so deduplicate on content rather than treating it as a further consecutive segment.
+3. **Fix the device**: exempt Collect from battery optimisation and set the microphone permission to "allow all the time". Worth doing anyway, but it does not generalise to the next tablet.
+
+Emulator tests on a throwaway form will not reproduce this — the failure needs a real hand-off to a real external app. Test on a device with the actual plug-in.
 
 ### The `p=` trap
 
