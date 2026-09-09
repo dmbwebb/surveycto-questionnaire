@@ -70,6 +70,10 @@ import requests
 DEFAULT_SERVER = os.environ.get("SURVEYCTO_SERVER")
 DEFAULT_USERNAME = os.environ.get("SURVEYCTO_USERNAME")
 KEYCHAIN_SERVICE_PREFIX = "surveycto-console"
+# Above this the console endpoint starts refusing multipart uploads with an
+# HTTP 200 whose JSON body is all nulls. Measured on kilongajfl 2026-09-09:
+# 2.2 MB accepted, 8.5 MB refused.
+LARGE_PAYLOAD_MB = 6.0
 
 # Multipart field names captured from the live web console request:
 #   files_attach=on, keepMediaFiles=on, draft=false, authToken=,
@@ -393,19 +397,33 @@ def upload_form(
     }
 
     files: list[tuple[str, tuple[str, bytes, str]]] = []
+    xlsx_bytes = form_xlsx.read_bytes()
     files.append((
         "form_def_file",
         (
             form_xlsx.name,
-            form_xlsx.read_bytes(),
+            xlsx_bytes,
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         ),
     ))
+    payload_bytes = len(xlsx_bytes)
     for mf in media_files or []:
+        blob = mf.read_bytes()
+        payload_bytes += len(blob)
         files.append((
             "datafile",
-            (mf.name, mf.read_bytes(), "application/octet-stream"),
+            (mf.name, blob, "application/octet-stream"),
         ))
+
+    payload_mb = payload_bytes / (1024 * 1024)
+    if media_files:
+        print(f"payload:   {len(media_files)} media file(s), {payload_mb:.1f} MB total")
+    if payload_mb > LARGE_PAYLOAD_MB:
+        print(
+            f"warning:   payload is {payload_mb:.1f} MB; the console endpoint "
+            f"rejects large uploads with an empty error. Attached media "
+            f"accumulates across uploads, so send only new or changed files."
+        )
 
     r = session.post(
         url,
@@ -426,11 +444,27 @@ def upload_form(
             exit_code=2,
         )
 
-    code = body.get("code")
+    # Some failures answer with {"code": 500, "message": ...} at the top level,
+    # others nest the same fields under "error" (e.g. "Maximum upload size
+    # exceeded"). Reading only the top level turns those into a bare
+    # "code=None / <no message>" that looks like nothing went wrong at all.
+    envelope = body.get("error") if isinstance(body.get("error"), dict) else body
+    code = envelope.get("code", body.get("code"))
     if code != 200:
+        detail = envelope.get("message") or "<no message returned by the server>"
+        hints = []
+        if payload_mb > LARGE_PAYLOAD_MB:
+            hints.append(
+                f"The payload was {payload_mb:.1f} MB. Attached media accumulates "
+                f"across uploads and survives a version replacement, so re-upload "
+                f"with only the files that are new or whose content changed."
+            )
         raise UploadError(
-            f"SurveyCTO rejected the upload (code={code}):\n"
-            f"  {body.get('message', '<no message>')}",
+            f"SurveyCTO rejected the upload (code={code}, HTTP {r.status_code}, "
+            f"payload {payload_mb:.1f} MB):\n"
+            f"  {detail}\n"
+            + "".join(f"  hint: {h}\n" for h in hints)
+            + f"  raw body: {r.text[:300]}",
             exit_code=3,
         )
     return body
