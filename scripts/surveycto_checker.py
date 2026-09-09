@@ -47,6 +47,22 @@ import openpyxl
 import pandas as pd
 
 
+# Types the form records by itself, with no respondent input. Multi-word types
+# have to be matched in full: `text audit` splits to the prefix `text`, which
+# is a real question type, so a prefix test counts the audit log as the first
+# thing the respondent answered.
+METADATA_TYPES = frozenset({
+    'start', 'end', 'today', 'deviceid', 'subscriberid', 'simserial',
+    'phonenumber', 'username', 'caseid', 'text audit',
+    'speed violations', 'sensor_statistic', 'sensor_stream',
+})
+
+# `audio audit` is deliberately absent above: it starts recording the
+# respondent, so survey timing must treat it as respondent input. It still
+# takes no answer, so it is not a question that can carry `required = yes`.
+NON_QUESTION_TYPES = METADATA_TYPES | {'audio audit'}
+
+
 class SurveyCTOChecker:
     """Validates SurveyCTO XLSForm files for common errors."""
 
@@ -353,9 +369,8 @@ class SurveyCTOChecker:
         print("\n=== Checking Required Fields ===")
 
         # Types that are NOT questions and should be excluded from this check
-        non_question_types = {
-            'note', 'calculate', 'deviceid', 'subscriberid', 'simserial',
-            'phonenumber', 'username', 'start', 'end', 'caseid', 'geopoint',
+        non_question_types = NON_QUESTION_TYPES | {
+            'note', 'calculate', 'geopoint',
             'begin group', 'end group', 'begin repeat', 'end repeat',
             'begin_group', 'end_group', 'begin_repeat', 'end_repeat'
         }
@@ -2070,7 +2085,16 @@ class SurveyCTOChecker:
             'enumerator', 'email', 'acknowledge'}
 
         def is_question(item):
-            prefix = item['type'].split()[0] if item['type'] else ''
+            field_type = (item['type'] or '').strip().lower()
+            # Passive metadata the form records on its own. `text audit` must
+            # be matched in full: splitting on whitespace leaves the prefix
+            # `text`, which would count the navigation event log as the first
+            # respondent-input field and force every survey-level timing row
+            # above the metadata block. `audio audit` is not exempt — it starts
+            # recording the respondent, so the interview has begun.
+            if field_type in METADATA_TYPES:
+                return False
+            prefix = field_type.split()[0] if field_type else ''
             return prefix in question_prefixes
 
         respondent_rows = [item for item in rows if is_question(item)]
