@@ -58,3 +58,15 @@ def test_expression_checker_accepts_supported_lookalike_functions():
     errors = _errors("count-selected(${items}) >= 1 and selected-at(${items}, 0) = 'a'")
 
     assert not errors
+
+
+def test_expression_checker_ignores_parentheses_inside_string_literals():
+    errors = _errors("concat(${t}, if(${h} < 12, ' de la mañana (', ' de la tarde ('), ${m}, ')')")
+
+    assert not errors
+
+
+def test_expression_checker_still_flags_real_unclosed_parenthesis():
+    errors = _errors("concat('a (', ${x}")
+
+    assert any("Unclosed parenthesis" in error for error in errors)

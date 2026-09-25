@@ -576,10 +576,18 @@ class SurveyCTOChecker:
         """
         errors = []
 
-        # Check 1: Balanced parentheses
+        # Check 1: Balanced parentheses, ignoring any inside '...' or "..." literals
+        # (a label fragment such as ' de la noche (' is a string, not syntax)
         paren_count = 0
+        quote = None
         for i, char in enumerate(expression):
-            if char == '(':
+            if quote:
+                if char == quote:
+                    quote = None
+                continue
+            if char in ("'", '"'):
+                quote = char
+            elif char == '(':
                 paren_count += 1
             elif char == ')':
                 paren_count -= 1
