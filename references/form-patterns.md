@@ -52,6 +52,20 @@ Home-grown reusable XLSForm recipes that don't fit the vendored references. Each
 
 ---
 
+## Wave-conditional wording
+
+**When to use:** a deployed form keeps running in a later wave (a tracking round months after the main wave) where some wording no longer fits ("cette année scolaire", "the last 3 months"), and answers must stay comparable with earlier interviews.
+
+- Add `late_wave = if(today() >= date('YYYY-MM-DD'), 1, 0)` near the top. It is stored with every submission, so analysis can tell which wording was shown.
+- For a reworded question, keep the row and its `name`. Replace only the changing phrase in each language's label with a text calculate: `lwt_x = if(${late_wave}=1, "new phrase", "original phrase")`, and write the label as `... ${lwt_x} ...`. The early-wave rendering is then the original text, and routing that references the variable needs no change. Put `<b>`, `${...}` references and punctuation in the label itself, not in the calculate string.
+- Use one calculate per distinct phrase and language (grammar differs across languages), each XPath string double-quoted so apostrophes survive.
+- Genuinely new questions (actual enrolment instead of intended enrolment) get new names shown only when `late_wave=1`; hide the superseded items with `${late_wave}=0`. A new choice can be limited to the late wave with a `filter` column plus `choice_filter` `filter != 'lw' or ${late_wave} = 1`.
+- Before writing, assert per edited label that substituting the original phrases reproduces the old label exactly (whitespace-normalised).
+
+**Worked example:** KILONGA 2 endline girls/boys/mothers forms, October 2026 tracking; scripts `late_wave_edits.py` and `late_wave_cette_annee.py` (session scratch; the pattern is fully described above).
+
+---
+
 ## Audio audits: segment long recordings
 
 **When to use:** any SurveyCTO form long enough that enumerators sometimes save it part-way and finish it later. That is nearly every household baseline. A single whole-survey audio audit loses those interviews entirely.
