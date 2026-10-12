@@ -40,12 +40,12 @@ When the form lives as a Google Sheet (the K2 baseline/midline/endline pattern),
 When the user (or another concurrent agent) is editing the gsheet alongside you, three things bite:
 
 - **Sheets API rate limit is 60 reads/min/user.** Per-cell `update_cell_checked` does ~2 calls per cell (one read, one write); 30+ cells in a tight loop will hit HTTP 429. Use `batch_update_cells(tab, edits)` (or the `bulk_set_column` shortcut) for bulk writes — one API call covers all rows, with built-in 429 retry. Read once via the exported xlsx (no API hit) to confirm preconditions, then batch-write.
-- **Locating rows by `(name, type)` pair: never write per-row scanners that call `get_cell` in a loop.** A naive `find_row_by_nametype` that calls `get_cell(tab, r, 'name')` and `get_cell(tab, r, 'type')` for every row in a 1700-row form makes ~3400 API calls per lookup → instantly hits 429 or just hangs for many minutes. Instead: re-export the gsheet (`gsheet_io.exported_xlsx(doc_id)`), find target rows in the local xlsx with openpyxl (zero API calls), then build a single `batch_update_cells` write. Pattern is in the `surveycto-questionnaire` skill's "Locating multiple rows by `(name, type)` pair" example.
+- **Locating rows by `(name, type)` pair: never write per-row scanners that call `get_cell` in a loop.** A naive `find_row_by_nametype` that calls `get_cell(tab, r, 'name')` and `get_cell(tab, r, 'type')` for every row in a 1700-row form makes ~3400 API calls per lookup → instantly hits 429 or just hangs for many minutes. Instead: re-export the gsheet (`gsheet_io.exported_xlsx(doc_id)`), find target rows in the local xlsx with openpyxl (zero API calls), then build a single `batch_update_cells` write. Against the live Sheet, use the single `values.get` scan shown under the `find_row_by_value` bullet below.
 - **Row numbers shift under you.** If you scan via `gsheet_io.exported_xlsx(doc_id)` and then write minutes later, a concurrent insertion above your target rows will shift everything down, and your row-number-keyed writes go to the wrong rows. The cell values *do* move with the content under insert/delete, so writes you already made stay correct — but verifications using stale row numbers will look broken even when the live state is fine. For risky write batches, prefer `find_row_by_value(tab, 'name', '<field_name>')` over hard-coded row numbers, and verify by name (not row) afterward.
 - **`regex()` is a whole-string match** (JavaRosa `Pattern.matches`, same in the web test view): `regex(${x}, ' wife_')` is always false; use `regex(${x}, '.* wife_.*')` or `^...$` anchors. Handy for select_multiple prefix tests: `regex(concat(' ', ${sel}, ' '), '.* wife_.*')`.
 - **No `${field}` references in constraint messages.** They compile to `<output>` in the itext, but the web test view shows a raw `${N}` placeholder in the red message (SQB recruiter form, 2026-08-18); labels/hints substitute fine. Word constraint messages without references.
 - **Disabling a field requires updating its callers.** Before setting `disabled = yes`, grep the survey for `${field_name}` references in `relevance`, `constraint`, `calculation`, `label`, `choice_filter`, `repeat_count`, `required` (and the choices sheet). Either drop those refs or update the formulas — leaving them produces "field reference to non-existent field" errors at upload. Same applies to renames (already handled by `rename_variable`, but only it).
-- **K2 forms with formula-based `name` cells (e.g. `="duration_"&B47`) trigger checker false-positive "blank/missing name" errors after an openpyxl save.** openpyxl writes formulas without cached values; the checker reads via pandas BEFORE the version-cell Excel recalc fires (recalc is the last check), so pandas sees these cells as NaN. To verify they're false positives, reload with `openpyxl.load_workbook(path, data_only=True)` AFTER running the checker — if the names resolve to real values like `duration_intro`, the form will upload fine. Common in K2 bracelet/lab/girls forms where `="duration_"&Bxx` appears at section ends. Don't try to "fix" the names; they're correct. Future Claudes: don't waste cycles trying to "fix" formula-based name false-positives — reload the checker output with `data_only=True` to confirm the formulas resolve, then ignore the error.
+- **K2 forms with formula-based `name` cells (e.g. `="duration_"&B47`) trigger checker false-positive "blank/missing name" errors after an openpyxl save.** openpyxl writes formulas without cached values; the checker reads via pandas BEFORE the version-cell Excel recalc fires (recalc is the last check), so pandas sees these cells as NaN. To verify they're false positives, reload with `openpyxl.load_workbook(path, data_only=True)` AFTER running the checker — if the names resolve to real values like `duration_intro`, the form will upload fine. Common in K2 bracelet/lab/girls forms where `="duration_"&Bxx` appears at section ends. Don't try to "fix" the names; they're correct.
 - **Disabling a whole module needs `disabled=yes` on EVERY row, not just the `begin group`.** A group-level relevance like `0=1` hides the questions on the device but the checker still treats the rows as active and flags duplicate names if you've added replacement questions elsewhere. Use `bulk_set_column(tab, rows, 'disabled', 'yes')` over the row range. Reads via the exported xlsx skip these rows correctly once disabled.
 - **`find_row_by_value` returns the FIRST match, including disabled duplicates.** Survey forms commonly have an old disabled `pulldata` calculate at row ~150 and the active version at row ~400 with the same `name` AND same `type` (e.g. K2 endline mothers form has two `calculate id_exist` rows; three `note fin` rows). Filtering by `(name, type)` alone is therefore *not enough* — you also need to check `disabled`. Scan A:P (the disabled column is at index 15 in K2 forms) in a single `values.get` call and skip rows where `disabled.lower() == 'yes'`. That's also the rate-limit-friendly way to locate many anchors at once. Pattern:
   ```python
@@ -129,15 +129,17 @@ The example commands below reference scripts via `$SURVEYCTO_SKILL_DIR`. Set thi
 export SURVEYCTO_SKILL_DIR="$HOME/.claude/skills/surveycto-questionnaire"
 ```
 
+Run every script in this skill with `~/.venvs/lifecoach/bin/python3` (the examples below write `python3` for brevity): bare `python3` can be the system 3.9 interpreter without `pandas`, `browser_cookie3` or the Google libraries. Install any missing upload deps (`browser_cookie3 requests`) into that venv. The same venv runs the google-docs/drive/sheets/email scripts.
+
 For the upload script, also set your SurveyCTO server host (no default is shipped):
 
 ```bash
 export SURVEYCTO_SERVER="your-server.surveycto.com"
 ```
 
-## ⚠️ MANDATORY: Validate After Every Edit
+## Validate with the checker
 
-**After ANY edit to an XLSForm file, you MUST run the checker to validate the form:**
+Run the checker after editing an XLSForm and before any upload:
 
 ```bash
 python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_checker.py" <path_to_xlsform.xlsx>
@@ -145,7 +147,7 @@ python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_checker.py" <path_to_xlsform.xls
 
 The default profile is SurveyCTO and enforces the SurveyCTO-specific `calculate_here` timing pattern. For an ODK or Kobo target, pass `--platform odk` or `--platform kobo`; all portable checks still run, but the incompatible SurveyCTO timing check is skipped.
 
-**This is not optional.** The checker catches errors that will break the form on SurveyCTO:
+The checker catches errors that will break the form on SurveyCTO:
 - References to non-existent fields (typos in `${field_name}`)
 - Undefined choice lists
 - Expression syntax errors (unbalanced parentheses, unclosed quotes)
@@ -157,7 +159,7 @@ The default profile is SurveyCTO and enforces the SurveyCTO-specific `calculate_
 - Formatting/conditional formatting preservation
 - And more
 
-**Run it iteratively throughout your editing session.** After each major edit (adding questions, renaming variables, changing logic), run the checker before moving on to the next edit. This catches errors early — don't batch all edits and check only at the end. Fix errors, re-run, fix more, re-run — until you get zero errors. Warnings are informational but errors must be resolved.
+Run it after each substantial change (new questions, renames, logic changes) so errors stay attributable to the change that caused them, and repeat until it reports zero errors. Warnings are informational; errors must be resolved.
 
 Note: when `settings.version` holds an unevaluated formula (no cached value — e.g. any xlsx freshly saved by openpyxl), the checker auto-launches Excel via `recalc_excel.sh` to evaluate it, which steals keyboard focus (see upload gotchas). To check a form without triggering Excel, run the checker on a scratch copy whose version cell is overwritten with a static string.
 
@@ -399,9 +401,9 @@ Header: `X-Requested-With: XMLHttpRequest`. Auth: standard Java servlet `JSESSIO
 - **Do not route activity solely from a numeric count that permits a negative unknown sentinel** such as `-97`. Conditions like `${count} = 0` and `${count} > 0` both skip the unknown case. When downstream logic needs to know whether any activity occurred, ask or derive a separate yes/no flag for sentinel responses and route on the combined activity indicator.
 - **Recover the exact xlsx of the DEPLOYED (or any earlier) version from the server**: `GET /forms/{form_id}/files` (console path at the server root, NOT under `/api/v1/`, which 404s) → `deployedGroupFiles.definitionFile.downloadLink` (and `previousDefinitionFiles[]` for older versions, each with `formVersion` + `downloadLink`); fetch with the same authenticated session (`load_session(server, username=...)`). **Every entry also carries `actor` (the uploader's login) and `dateStr`**, so this one call answers "who deployed this and when" for the whole version history — use it instead of the console's Previous-deployed-versions page when a form's live version has moved since your last known deploy and you need to identify a collaborator's hand edit before rebuilding (2026-09-09). Needed when the user's edit list quotes question IDs from what the tablets show and the local build has since been renumbered or moved on (2026-08-17: local was an undeployed round ahead of live). Convert with `surveycto_to_txt.py` and map IDs → field names from that copy, never from the local build. Before redeploying a Sheet-backed form whose Sheet was edited after its last deploy, diff the Sheet export against this deployed definition (all columns of survey/choices/settings): collaborators' stray edits otherwise ship silently (2026-09-29: a French note label overwritten with "ger" months earlier, and live Malagasy corrections by the survey firm).
 - **Choice labels may reference `${field}`** (e.g. `Only ${db_religion_group}`); SurveyCTO compiles them to `<output value=...>` inside the itext, so option text can be personalised from an earlier answer or calculate. Verified in the compiled XForm 2026-08-15.
-- **A visible field's `calculation` (prefill/dynamic default, e.g. an editable ID prefilled `concat(${enumerator_id}, '-', format-date(today(), '%Y%m%d'), '-')`) compiles as a `calculate` attribute on the `<input>` BODY element, not on the `<bind>`** — a bind-only readback wrongly concludes the prefill was dropped. Check `<input ref=... calculate=...>` when verifying prefills in compiled XForm (2026-08-20, SQB recruiter Round 15).
+- **A visible field's `calculation` (prefill/dynamic default, e.g. an editable ID prefilled `concat(${enumerator_id}, '-', format-date(today(), '%Y%m%d'), '-')`) compiles as a `calculate` attribute on the `<input>` BODY element, not on the `<bind>`** — a bind-only readback wrongly concludes the prefill was dropped. Check `<input ref=... calculate=...>` when verifying prefills in compiled XForm.
 - **When walking group nesting in a survey sheet, match types exactly** (`begin group`/`begin repeat`/`end group`/`end repeat`) — `type.startswith('end')` also matches the metadata `end` timestamp field and corrupts the stack.
-- **Submission data via the console cookie**: `GET /api/v2/forms/data/wide/json/{form_id}?date=0` works with the JSESSIONID session (no separate API user needed) — handy for verifying a test submission's fields right after upload.
+- **Submission data**: `GET /api/v2/forms/data/wide/json/{form_id}?date=0` with HTTP basic auth, using the console username and the Keychain password (`read_keychain_password(server, username)` in `surveycto_upload.py`); no separate API user is needed. The console cookie session returns 401 on this endpoint (verified 2026-10-12). Handy for verifying a test submission's fields right after upload; pass `date=<epoch seconds>` to fetch only newer submissions.
 
 ### User management via the console API (add/remove server users)
 
@@ -463,7 +465,7 @@ The template (vendored from the official SurveyCTO skill) ships with the exact S
 
 ### Deriving a New Form from an Existing One (build-script pattern)
 
-When form B is a heavy edit of form A (e.g. a pilot variant: ~150 deletions, moved blocks, new modules), do NOT mutate a copy incrementally. Write ONE re-runnable Python build script that `shutil.copy`s the source form fresh and applies every transformation (delete-by-name bottom-up, capture+delete+insert to move blocks, insert-after-named-anchor for new rows, choice-list edits, then auto-prune unused choice lists by scanning `select_one/select_multiple` types). Each fix iteration = edit script → re-run → re-run checker. Benefits: deterministic rebuilds, reviewable diff of intent, audit fixes append as a phase-2 section, and the source form stays pristine. Worked example: `AI HEALTH/piloting/transport_pilot/questionnaires/build_transport_baseline.py` (Jan baseline → transport baseline; group split, scale-block relocation, ~90 new rows, settings/version/instance_name). To restore blocks from a THIRD form (not the copy source), port rows across workbooks by name instead of retyping labels: copy the first ~22 columns by index after asserting both header layouts match, and copy the label/label:Hindi cell FONTS too — verified Hindi stays black while your insert helper reddens only genuinely new text (worked example: `port_jan_rows`/`apply_jan_fonts`/`port_jan_choices` in `AI HEALTH/piloting/planning_info_test/questionnaires/build_infoplan_baseline.py`). Three more rules from the AI Health main-study build (2026-08-30): apply cross-cutting gates (study arm, village-level factor) as the LAST step of a section — any later `set_cell(name, C_REL, ...)` silently overwrites an earlier `and_rel`, which leaked information-arm items into the control arm until a walkthrough caught it; assert (don't eyeball) that question-ID prefixes are unique AND that each ID labels the same row in every language (`CM.1` was used by both the medicines and the transport-companion blocks) — they confuse enumerators and break label-keyed tooling. Make it a hard assertion because the usual way IDs collide is a blanket `str.replace("Q6.7:", "Q6.9:")` renumber that also sweeps up a row you inserted moments earlier; renumber highest-ID-first, and expect the assertion to catch both a collision and a row that picked up an ID in one language only (it caught both, twice, in one SQB session). Walk every arm-by-village path headlessly (surveycto-tester `surveycto_walk.py`) before calling a build done. Two gotchas: never hand-edit the generated xlsx (rebuild wipes it — put a note in the project CLAUDE.md); write a computed static `settings.version` string from `datetime.now()` in the script rather than the NOW() formula (openpyxl can't cache formula values, so a rebuild would otherwise upload a literal `=TEXT(...)` string).
+When form B is a heavy edit of form A (e.g. a pilot variant: ~150 deletions, moved blocks, new modules), do NOT mutate a copy incrementally. Write ONE re-runnable Python build script that `shutil.copy`s the source form fresh and applies every transformation (delete-by-name bottom-up, capture+delete+insert to move blocks, insert-after-named-anchor for new rows, choice-list edits, then auto-prune unused choice lists by scanning `select_one/select_multiple` types). Each fix iteration = edit script → re-run → re-run checker. Benefits: deterministic rebuilds, reviewable diff of intent, audit fixes append as a phase-2 section, and the source form stays pristine. Worked example: `AI HEALTH/piloting/transport_pilot/questionnaires/build_transport_baseline.py` (Jan baseline → transport baseline; group split, scale-block relocation, ~90 new rows, settings/version/instance_name). To restore blocks from a THIRD form (not the copy source), port rows across workbooks by name instead of retyping labels: copy the first ~22 columns by index after asserting both header layouts match, and copy the label/label:Hindi cell FONTS too — verified Hindi stays black while your insert helper reddens only genuinely new text (worked example: `port_jan_rows`/`apply_jan_fonts`/`port_jan_choices` in `AI HEALTH/piloting/planning_info_test/questionnaires/build_infoplan_baseline.py`). Three more rules: apply cross-cutting gates (study arm, village-level factor) as the LAST step of a section, because any later `set_cell(name, C_REL, ...)` silently overwrites an earlier `and_rel` and can leak treatment-arm items into the control arm; assert (don't eyeball) that question-ID prefixes are unique AND that each ID labels the same row in every language, because duplicates confuse enumerators and break label-keyed tooling. Make it a hard assertion because the usual way IDs collide is a blanket `str.replace("Q6.7:", "Q6.9:")` renumber that also sweeps up a row you inserted moments earlier; renumber highest-ID-first, and expect the assertion to catch both a collision and a row that picked up an ID in one language only. Walk every arm-by-village path headlessly (surveycto-tester `surveycto_walk.py`) before calling a build done. Two gotchas: never hand-edit the generated xlsx (rebuild wipes it — put a note in the project CLAUDE.md); write a computed static `settings.version` string from `datetime.now()` in the script rather than the NOW() formula (openpyxl can't cache formula values, so a rebuild would otherwise upload a literal `=TEXT(...)` string).
 
 **Taking over a collaborator's form that exists only on the server:** download the deployed definition (`/forms/{id}/files` → `deployedGroupFiles.definitionFile.downloadLink`, which also names the `actor` and `dateStr`), then make Phase 0 of the build script *reproduce that baseline and assert it cell-for-cell* against the served file before any edit phase runs — extract the baseline rows into a generated literal module so the reproduction is specified in code rather than implied by a `shutil.copy`. Give it a `--baseline-only` flag. This converts "I think my edits are surgical" into a checkable claim, makes every later phase a reviewable delta, and catches the case where you were editing a stale local copy. Still copy the served workbook as the write target so SurveyCTO's help sheets, conditional formatting and column widths survive.
 
@@ -562,7 +564,7 @@ gender    | female | Female
 
 - `form_title` (required) - Survey name displayed to users
 - `form_id` (required) - Unique identifier (lowercase with underscores)
-- `version` - **MUST use a NOW()-based formula, NEVER a hardcoded value.** Use: `=TEXT(YEAR(NOW())-2000+2, "00") & TEXT(MONTH(NOW()), "00") & TEXT(DAY(NOW()), "00") & TEXT(HOUR(NOW()), "00") & TEXT(MINUTE(NOW()), "00")`. The `+2` offset ensures versions are always lexically greater than legacy versions. **IMPORTANT:** SurveyCTO cannot evaluate Excel formulas — the formula must be evaluated (cached) before upload. After writing the formula with openpyxl, run `recalc_excel.sh <file>` to open the file in Excel, evaluate the formula, and save the cached value. The checker will do this automatically if the script is available.
+- `version` - Must be lexically greater than the deployed version and at most 10 digits, and must be a cached or static value at upload, because SurveyCTO does not evaluate Excel formulas. Forms use either the NOW()-based formula `=TEXT(YEAR(NOW())-2000+2, "00") & TEXT(MONTH(NOW()), "00") & TEXT(DAY(NOW()), "00") & TEXT(HOUR(NOW()), "00") & TEXT(MINUTE(NOW()), "00")` (the `+2` offset keeps versions above legacy ones; after writing it with openpyxl, run `recalc_excel.sh <file>` to cache the value, which the checker does automatically when the script is available) or a static string computed by a build script. Keep the convention the form already uses: switching can produce a lexically smaller version (see Common gotchas, Version bump rule).
 - `default_language` - Default language for multi-language surveys
 - `instance_name` - Display format: `concat(${name}, ' - ', ${date})`
 
@@ -879,25 +881,6 @@ for row in survey.iter_rows(min_row=2):  # Skip header
 wb.save('survey.xlsx')
 ```
 
-### Batch Operations
-
-```python
-import pandas as pd
-
-# Read survey
-df = pd.read_excel('survey.xlsx', sheet_name='survey')
-
-# Add section prefix to all names
-df['name'] = 'd1_' + df['name']
-
-# Make all text questions required
-df.loc[df['type'] == 'text', 'required'] = 'yes'
-
-# Save back
-with pd.ExcelWriter('survey.xlsx', engine='openpyxl') as writer:
-    df.to_excel(writer, sheet_name='survey', index=False)
-```
-
 ### Formatting Surveys
 
 ```python
@@ -926,7 +909,7 @@ wb.save('survey.xlsx')
 
 ## Best Practices
 
-### ⚠️ CRITICAL: Preserving Cell Formatting
+### Preserving cell formatting
 
 **This project uses cell formatting with semantic meaning:**
 
@@ -934,7 +917,7 @@ wb.save('survey.xlsx')
 - **Gray background** = Section headers or special rows
 - Removing this formatting loses important information about translation status
 
-**ALWAYS use openpyxl (not pandas) when editing Excel files:**
+**Edit Excel files with openpyxl, not pandas: pandas rewrites the sheet and drops all formatting.**
 
 ```python
 # ✅ CORRECT: Use openpyxl to preserve formatting
@@ -995,9 +978,9 @@ hindi_cell.font = Font(color='000000')  # BLACK = verified
 python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_checker.py" survey.xlsx
 ```
 
-### ⚠️ CRITICAL: Renaming Variables
+### Renaming variables
 
-**When renaming any variable (changing the `name` column), you MUST search the entire sheet for ALL other references to that variable and update them too.**
+When renaming a variable (the `name` column), update every `${...}` reference to it across the survey and choices sheets; on a Sheet-backed form, `gsheet_edit.rename_variable` does this in one call.
 
 Variables are referenced using `${variable_name}` syntax in these columns:
 - `relevance` - Skip logic conditions
@@ -1008,7 +991,7 @@ Variables are referenced using `${variable_name}` syntax in these columns:
 - `repeat_count` - Dynamic repeat counts
 - `required` - Conditional required logic
 
-**Failing to update all references will break the form!**
+A missed reference fails the checker and the upload.
 
 **Example - Renaming a variable:**
 
@@ -1070,7 +1053,7 @@ wb.save('survey.xlsx')
 2. [ ] Update every reference found
 3. [ ] Rename the variable itself in the `name` column
 4. [ ] Run the SurveyCTO checker to validate: `python3 "$SURVEYCTO_SKILL_DIR/scripts/surveycto_checker.py" survey.xlsx`
-5. [ ] Test the form in XLSForm validator
+5. [ ] Upload as a draft (`surveycto_upload.py --update <form_id> --draft`) so SurveyCTO compiles it without touching devices
 
 ### Form Structure
 
@@ -1097,7 +1080,7 @@ wb.save('survey.xlsx')
 
 **Choose the right library:**
 
-- **pandas**: Data analysis, bulk operations, reading data
+- **pandas**: Reading and analysing survey content (never for writing the workbook back)
 - **openpyxl**: Adding/modifying questions, preserving structure, formatting
 
 **Preserve structure:**
@@ -1117,7 +1100,7 @@ wb.save('survey.xlsx')
 
 Before deployment:
 
-1. **Validate XLSForm:** Use https://getodk.org/xlsform/
+1. **Validate XLSForm:** Run the checker, then a draft upload (see Common gotchas) so SurveyCTO's own parser compiles it; the ODK online converter rejects SurveyCTO-only types such as `calculate_here` and `audio audit`
 2. **Test skip logic:** Questions appear/hide correctly
 3. **Test calculations:** Computed values are correct
 4. **Test constraints:** Validation works as expected
@@ -1126,7 +1109,7 @@ Before deployment:
 
 ## Common Errors
 
-1. **SurveyCTO diverges from ODK/XPath** — never copy generic ODK snippets unedited. The load-bearing divergences: equality is `=` (never `==`); division is `div` (not `/`); current repeat index is `index()` (ODK's `position(..)` can fail in a non-repeating group inside a repeat); choice labels via `choice-label(field, value)` (preferred over `jr:choice-name()`, different arg order); the skip-logic column is `relevance` (not `relevant`); `select_multiple` membership needs `selected()`, never `=`. The checker errors on `==` and the unsupported functions below. Full function tables with signatures, worked patterns, and a symptom→cause→fix pitfalls table: [`references/expressions.md`](references/expressions.md).
+1. **SurveyCTO diverges from ODK/XPath** — never copy generic ODK snippets unedited. The load-bearing divergences: equality is `=` (never `==`); division is `div` (not `/`); current repeat index is `index()` (ODK's `position(..)` can fail in a non-repeating group inside a repeat); choice labels via `choice-label(field, value)` (preferred over `jr:choice-name()`, different arg order); the skip-logic column is `relevance` (not `relevant`); `select_multiple` membership needs `selected()`, never `=`. The checker errors on `==` and on `starts-with()`, `contains()`, `substring-before()` and `substring-after()`; it does not detect the other unsupported functions in item 2. Full function tables with signatures, worked patterns, and a symptom→cause→fix pitfalls table: [`references/expressions.md`](references/expressions.md).
 
 2. **Unsupported functions:** SurveyCTO doesn't support `starts-with()`, `contains()`, `substring-before()`, `substring-after()`, `upper-case()`/`lower-case()`, or `translate()` — even though [ODK docs](https://docs.getodk.org/form-operators-functions/) list several of them, SurveyCTO's JavaRosa parser rejects them with "cannot handle function 'substring-after'". Use `substr(string, 0, N) = 'prefix'` and `regex(string, '.*pattern.*')` for matching, and `selected-at(string, N)` (zero-indexed, space-separated) for extraction. **When in doubt, check [SurveyCTO's expressions reference](https://docs.surveycto.com/02-designing-forms/01-core-concepts/09.expressions.html), NOT the ODK docs** — SurveyCTO's XPath function set is a strict subset of ODK's. With neither `upper-case()` nor `translate()`, a form **cannot normalise typed text at all** — no case folding, no stripping stray spaces. Handle case in the data instead (emit upper- and lower-case key rows in the `pulldata` CSV so either spelling resolves) and block stray characters with a constraint such as `regex(., '^[A-Za-z0-9-]+$')` rather than trying to clean them in an expression. The server rejects each unsupported function one at a time, so a form using several costs one failed upload per function: grep the built workbook for them before uploading.
 
@@ -1165,7 +1148,6 @@ Converting a Kobo/ODK XLSForm, CommCare XForms XML, or Qualtrics `.qsf` export i
 - **XLSForm specification:** https://xlsform.org
 - **SurveyCTO documentation:** https://docs.surveycto.com
 - **ODK documentation:** https://docs.getodk.org — CAUTION: SurveyCTO's function set diverges (see Common Errors above); check SurveyCTO's own expressions reference first
-- **XLSForm validation:** https://getodk.org/xlsform/
 
 ### Bundled reference library
 
@@ -1231,22 +1213,22 @@ When working with surveys:
 2. **Editing:** Load with openpyxl to preserve structure
 3. **Adding logic:** Clarify conditions and affected questions
 4. **Translations:** Ask which languages needed
-5. **Bulk operations:** Use pandas for efficiency
+5. **Bulk operations:** Use openpyxl on a local xlsx, or `batch_update_cells` on a Sheet-backed form
 6. **Timing:** For SurveyCTO forms, instrument every substantive section and the overall form using [`references/timing.md`](references/timing.md); verify a platform-supported alternative for ODK/Kobo forms
 7. **Testing:** Validate after changes
 
 Always explain modifications so users understand XLSForm structure.
 
-## Server datasets: prefill, roster pickers & console automation (learned Jun 2026, transport pilot)
+## Server datasets: prefill, roster pickers & console automation
 
 Pattern for one form to prefill from another form's submissions (e.g. transport-day forms reading the baseline):
 
 - **Publish form → dataset:** Design tab → create server dataset → "Publish into" the source form → "Add all" → set **unique ID = the key field** (gives update-or-insert). Attach the dataset to each consuming form. There is a **~5–10 min refresh lag** before the attached CSV regenerates (+ device sync) — just-collected rows won't appear instantly.
 - **Prefill a value:** `pulldata('dataset','col','keycol',${key})` (returns `''` on no match — guard with `string-length(...) = 0`).
-- **Roster picker from a dataset, filtered:** `select_one/multiple <list>` with `appearance: search('dataset','matches','<filtercol>',${field})`. The choices sheet needs ONE placeholder row whose `value` cell = the dataset column to STORE and `label` cell = comma-separated columns to DISPLAY (e.g. `d4_name,d5b_age`). `search()` works identically on a published server dataset or a static `.csv` (source = dataset id / filename-without-.csv). **Those cells name COLUMNS, in every language column** — never wrap a translation in `<i>`/`<span>` or the first and last comma-separated tokens stop matching and the picker renders blank in that language only (Aug 2026: an `<i>`-wrapped Bengali label reduced a three-column case picker to one, so enumerators could not tell two same-ID people apart). `surveycto_checker.py` now errors on this.
+- **Roster picker from a dataset, filtered:** `select_one/multiple <list>` with `appearance: search('dataset','matches','<filtercol>',${field})`. The choices sheet needs ONE placeholder row whose `value` cell = the dataset column to STORE and `label` cell = comma-separated columns to DISPLAY (e.g. `d4_name,d5b_age`). `search()` works identically on a published server dataset or a static `.csv` (source = dataset id / filename-without-.csv). **Those cells name COLUMNS, in every language column** — never wrap a translation in `<i>`/`<span>` or the first and last comma-separated tokens stop matching and the picker renders blank in that language only. `surveycto_checker.py` errors on this.
 - **Interview duration and section timing:** follow the mandatory pattern in [`references/timing.md`](references/timing.md). Use `calculate_here` checkpoints and guarded subtraction, never a plain calculation over the `end` metadata field. The checker flags the latter because it exports empty.
-- **Filter-key values must be unique across rounds/waves.** The dataset accumulates ALL rounds' records, so reusing a choice code (e.g. village `v01` in round 1 AND round 2) makes `search()` surface the earlier round's records in the new round's roster (transport round 2, Aug 2026: Bhumlawas showed round-1 Kalimagri patients). Assign fresh codes each round (v06, v07, …) or add a round column to the filter.
-- **Server read endpoints that work with the keychain session** (from `surveycto_upload.load_session(server, username, auth_mode='keychain')`): `GET /formList` returns every LIVE form id + deployed version (the reliable way to confirm what a deploy actually landed), and `GET /api/v1/forms/data/wide/csv/{formId}` returns submissions as CSV (HTTP 204 = zero submissions — useful before a breaking change). `/api/v2/...` 404s and `/console/forms-groups-datasets/get` returns 403/500 even with a CSRF token; don't burn time on them.
+- **Filter-key values must be unique across rounds/waves.** The dataset accumulates ALL rounds' records, so reusing a choice code (e.g. village `v01` in round 1 AND round 2) makes `search()` surface the earlier round's records in the new round's roster. Assign fresh codes each round (v06, v07, …) or add a round column to the filter.
+- **Server read endpoints use HTTP basic auth** with the console username and the Keychain password (`read_keychain_password(server, username)`), not the console cookie session from `load_session(...)`, which gets a login page from `/formList` and 401 from the `/api/v1` and `/api/v2` data endpoints (verified 2026-10-12). With basic auth: `GET /formList` returns every LIVE form id + deployed version (the reliable way to confirm what a deploy actually landed); `GET /api/v1/forms/data/wide/csv/{formId}` returns submissions as CSV (HTTP 204 = zero submissions, useful before a breaking change); `GET /api/v2/forms/data/wide/json/{formId}?date=<epoch>` returns JSON. `/console/forms-groups-datasets/get` returns 403/500 even with a CSRF token; don't burn time on it.
 - **Dataset attachments in `deployedGroupFiles.mediaFiles` have server-relative `downloadLink`s** (`/forms/{id}/dataset-attachment/...`) unlike regular media files' absolute URLs — prepend `https://{server}` before fetching.
 - **Repeat over a select_multiple's picks** (ask sub-questions per selected item): `begin repeat` with `repeat_count=count-selected(${picks})`; inside, `calculate idx = index()-1`, `calculate this = selected-at(${picks}, ${idx})` (0-indexed, returns the stored value), then `pulldata('dataset','col','keycol',${this})` for per-item detail.
 - **Flatten repeat-group answers into one string** (e.g. to pass to a field plug-in parameter, which cannot reference repeat fields directly): per-instance `calculate flat = concat(field1, ' [', field2, ']')` inside the repeat, then outside it `calculate all = join(' || ', ${flat})` — SurveyCTO supports `join(separator, repeatedfield)`. Pick a separator that cannot appear in enumerator-typed text. A `field-list`-appearance group inside each repeat instance puts that instance's fields on one screen (worked example: AI Health transport baseline medications/documents module, Aug 2026).
@@ -1265,9 +1247,7 @@ Pattern for one form to prefill from another form's submissions (e.g. transport-
 - Endpoint discovery pattern when the console UI changes: the SPA's endpoints live in `/js/scto/console/*.js` and lazy-loaded `/modules/**` — from a logged-in console tab, `performance.getEntriesByType('resource')` lists them and a sync XHR + regex finds the `$.ajax` call sites (datasets CRUD in `console/datasets.js`, publish config in `console/export.js` `savePublishingConfig`).
 - Upload CSV rows to a dataset: `POST /datasets/{datasetId}/upload?csrf_token=...` multipart with `dataset_file` (a CSV File/Blob), `dataset_upload_mode` ∈ `append|merge|clear`, `dataset_id`. From the browser, set the modal's `input[name=dataset_file]` via DataTransfer (a `new File([csv],name,{type:'text/csv'})` Blob) + dispatch `change`, then click the "Upload" submit — no native file picker needed.
 
-**SurveyCTO skill Python on this Mac:** `/usr/local/bin/python3` does NOT exist, and bare `python3` can lack `pandas`, `browser_cookie3`, or the Google libraries. Run `surveycto_checker.py`, `surveycto_to_txt.py`, and `surveycto_upload.py` with `~/.venvs/lifecoach/bin/python3`; install any missing upload deps (`browser_cookie3 requests`) into that venv. The same venv runs the google-docs/drive/sheets/email scripts.
-
-### Data API gotchas (wide-JSON endpoint, learned Aug 2026)
+### Data API gotchas (wide-JSON endpoint)
 
 - Pull data with `GET /api/v2/forms/data/wide/json/{form_id}?date=0` (basic
   auth, API-enabled role). The `wide/csv` route WITHOUT a `date` parameter
@@ -1287,11 +1267,10 @@ Pattern for one form to prefill from another form's submissions (e.g. transport-
   the wording "this form", one successful pull is followed at once by "wait 300
   seconds" for any other form (verified live 2026-09-02) — plus 30 API
   requests/min/server. Parse the wait from the body and make no full pull until
-  it elapses; every early retry re-collides with the window (a 5×15 s retry
-  loop guaranteed failure and kept the MRD baseline forms at 0 successful pulls
-  in ~4,000 cron runs, Aug-Sep 2026). With N forms, pull ONE per run, oldest
-  first, on a cron slower than the window (6 min: a 5-min cron fired seconds
-  before the window reopened and wasted every other run); all pullers (cron +
+  it elapses; every early retry re-collides with the window, so a short retry
+  loop never succeeds. With N forms, pull ONE per run, oldest
+  first, on a cron slower than the window (6 min, because a 5-min cron fires
+  just before the window reopens); all pullers (cron +
   a console "Sync now" button + an R script) share that one window, so
   coordinate through stored "last pulled / wait until" state. Incremental
   `date=<timestamp>` pulls are the documented way around the limit. A truly
