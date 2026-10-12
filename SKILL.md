@@ -1119,7 +1119,7 @@ Before deployment:
 
 5. **Extracting structured data from a field plug-in's output:** Use the `plug-in-metadata()` + `selected-at()` pattern. The plug-in calls `setMetaData(spaceSeparatedString)` (where any value containing spaces has its spaces replaced with `_`), and a calculate field then reads `selected-at(plug-in-metadata(${plugin_field}), N)` for the Nth value (zero-indexed). Direct JSON parsing in the form is impossible — there's no `substring-before/after`, `regex-replace`, or JSON parser.
 
-6. **Dynamic constraint messages work:** `constraint message` (and its language columns) may contain `${field}` references; the server compiles them to `<output value=...>` in the itext (verified 2026-08-17). `substr(string, start, end)` is 0-based, start inclusive, end exclusive: on `KMP1-OF-07A`, `substr(., 5, 7)` = `OF` and `substr(., 8, 10)` = `07`.
+6. **`substr(string, start, end)` is 0-based,** start inclusive, end exclusive: on `KMP1-OF-07A`, `substr(., 5, 7)` = `OF` and `substr(., 8, 10)` = `07`.
 1. **Duplicate names:** Each question needs unique name
 2. **Missing list_name:** select questions must reference existing choice list
 3. **Syntax errors:** Check parentheses, quotes, operators in logic
