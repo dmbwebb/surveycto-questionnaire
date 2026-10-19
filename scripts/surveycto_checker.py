@@ -1505,11 +1505,16 @@ class SurveyCTOChecker:
         # Use a stack to track group nesting and child counts
         # Each stack entry: (excel_row, group_name, child_count)
         stack = []
+        # Unbalanced begin/end rows: SurveyCTO rejects with "Unmatched end statement"
+        unbalanced = []
 
         for excel_row, field_type, field_name in rows:
             if field_type in ('begin group', 'begin_group', 'begin repeat', 'begin_repeat'):
                 stack.append((excel_row, field_name, 0))
             elif field_type in ('end group', 'end_group', 'end repeat', 'end_repeat'):
+                if not stack:
+                    unbalanced.append(f"  Row {excel_row}: '{field_type}' {field_name!r} has no matching begin row\n"
+                                      f"    SurveyCTO rejects this ('Unmatched end statement').\n")
                 if stack:
                     begin_row, group_name, child_count = stack.pop()
                     if child_count == 0:
@@ -1528,6 +1533,12 @@ class SurveyCTOChecker:
                     parent = stack[-1]
                     stack[-1] = (parent[0], parent[1], parent[2] + 1)
 
+        for begin_row, group_name, _ in stack:
+            unbalanced.append(f"  Row {begin_row}: group/repeat {group_name!r} is never closed by an end row\n")
+        for msg in unbalanced:
+            print(f"❌{msg}")
+            self.errors.append(msg)
+
         if issues:
             print(f"\n❌ Found {len(issues)} empty group(s)/repeat(s) (no enabled children):\n")
             for issue in issues:
@@ -1539,7 +1550,7 @@ class SurveyCTOChecker:
         else:
             print("✅ All groups/repeats have enabled children")
 
-        return len(issues) == 0
+        return len(issues) == 0 and not unbalanced
 
     def check_naming_conventions(self):
         """Check for naming convention issues in field names."""
