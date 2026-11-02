@@ -64,6 +64,13 @@ Home-grown reusable XLSForm recipes that don't fit the vendored references. Each
 
 **Worked example:** KILONGA 2 endline girls/boys/mothers forms, October 2026 tracking; scripts `late_wave_edits.py` and `late_wave_cette_annee.py` (session scratch; the pattern is fully described above).
 
+### Cutting a deployed form down for a new round (e.g. a phone round)
+
+- Gate every dropped row with a round flag (`and ${phone_round}=0`) instead of `disabled=yes` or deleting it: the earlier submissions keep their field definitions and export columns, and the change is reversible. Gate whole groups at the `begin group` row; gate a dependent follow-up explicitly when its relevance contains `or` or tests a blank against `=0`.
+- Hard-stop rows written for in-person work (a `required` note such as "on ne peut pas enquêter sans consentement") strand a remote enumerator, who can neither continue nor record the failed attempt. In the new round, gate them and add a non-required end note plus an "incomplete" reason code, so the form runs to its status question.
+- To dry-run a large batch of row inserts before writing to the Sheet, apply them to the exported xlsx loaded with `data_only=True`: K2 forms build some `name` cells with formulas (`="duration_"&B47`), which openpyxl's `insert_rows` does not shift, so a formula-preserving copy shows spurious duplicate names. The Sheet's own `insertDimension` shifts them correctly.
+- Worked example: K2 girls phone-tracking form, November 2026 phone round (`phone_round` flag, guardian status block, consent dead-end fixed after an independent review).
+
 ---
 
 ## Audio audits: segment long recordings
