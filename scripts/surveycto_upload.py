@@ -105,9 +105,14 @@ def _new_session() -> requests.Session:
     return session
 
 
+def normalize_server(server: str) -> str:
+    """Expand a bare server name ("kilongajfl") to its full hostname."""
+    return server if "." in server else f"{server}.surveycto.com"
+
+
 def keychain_service(server: str) -> str:
     """Return the per-server macOS Keychain service name."""
-    return f"{KEYCHAIN_SERVICE_PREFIX}:{server}"
+    return f"{KEYCHAIN_SERVICE_PREFIX}:{normalize_server(server)}"
 
 
 def read_keychain_password(server: str, username: str) -> str | None:
@@ -273,6 +278,7 @@ def load_session(
     """
     if auth_mode not in {"auto", "keychain", "chrome"}:
         raise ValueError(f"Unsupported authentication mode: {auth_mode}")
+    server = normalize_server(server)
 
     session = _new_session()
 
