@@ -96,29 +96,32 @@ for fid in FORMS:
 s, tok, st, us, ds = console()
 print(f"before: {us['currentDataUsage']/1e9:.2f} of {us['maxDataUsage']/1e9:.2f} GB;",
       {fid: f'{st.get(fid, 0)/1e9:.3f} GB' for fid in FORMS}, '| linked datasets rows:', ds)
+on_server = {}
 for fid in FORMS:
     srv = server_keys(fid); arc = set(archived[fid])
     print(f'{fid}: server {len(srv)}, archive {len(arc)}, server-not-archived {len(srv - arc)}, archived-not-on-server {len(arc - srv)}', flush=True)
     if srv - arc: raise SystemExit(f'{fid}: the server has submissions that are not frozen; refreeze first')
+    on_server[fid] = srv
 
 if not EXECUTE:
     print('dry run only; nothing purged'); sys.exit(0)
 
-log = {}
 for fid in FORMS:
-    keys = archived[fid]; purged = []
+    # Resumable: send only frozen KEYs still on the server, and log each batch as it returns.
+    # A batch of 50 large encrypted submissions outlasted a 120 s timeout (K3, 2026-11-06);
+    # rerunning the same command then purges only what is left.
+    keys = sorted(set(archived[fid]) & on_server[fid]); purged = []
     for i in range(0, len(keys), 50):
         batch = keys[i:i + 50]
         r = s.post(f'https://{S}/forms/{fid}/purge-specific', data={'uuids': ','.join(batch)},
-                   headers={'X-csrf-token': tok}, timeout=120)
+                   headers={'X-csrf-token': tok}, timeout=600)
         r.raise_for_status(); got = r.json(); purged += got
+        with open(os.path.join(ARCH, fid, 'purge_log.jsonl'), 'a') as f:
+            f.write(json.dumps({'at_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                                'endpoint': f'/forms/{fid}/purge-specific', 'sent': batch, 'purged': got}) + '\n')
         if set(got) != set(batch):
             raise SystemExit(f'{fid}: batch {i//50 + 1} mismatch (not purged: {sorted(set(batch) - set(got))[:3]}); stopping')
-    log[fid] = purged
-    print(f'{fid}: purged {len(purged)} of {len(keys)}', flush=True)
-    with open(os.path.join(ARCH, fid, 'purge_log.json'), 'w') as f:
-        json.dump({'purged_at_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-                   'endpoint': f'/forms/{fid}/purge-specific', 'purged_keys': purged}, f, indent=1)
+    print(f'{fid}: purged {len(purged)} of the {len(keys)} frozen KEYs still on the server', flush=True)
 
 time.sleep(5)
 for fid in FORMS:
