@@ -111,12 +111,13 @@ for fid in FORMS:
     # A batch of 50 large encrypted submissions outlasted a 120 s timeout (K3, 2026-11-06);
     # rerunning the same command then purges only what is left.
     keys = sorted(set(archived[fid]) & on_server[fid]); purged = []
+    log_path = os.path.join(ARCH, fid, 'purge_log.jsonl')
     for i in range(0, len(keys), 50):
         batch = keys[i:i + 50]
         r = s.post(f'https://{S}/forms/{fid}/purge-specific', data={'uuids': ','.join(batch)},
                    headers={'X-csrf-token': tok}, timeout=600)
         r.raise_for_status(); got = r.json(); purged += got
-        with open(os.path.join(ARCH, fid, 'purge_log.jsonl'), 'a') as f:
+        with open(log_path, 'a') as f:
             f.write(json.dumps({'at_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                                 'endpoint': f'/forms/{fid}/purge-specific', 'sent': batch, 'purged': got}) + '\n')
         if set(got) != set(batch):
