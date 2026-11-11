@@ -314,9 +314,8 @@ def load_session(
         return session
 
     username = username or DEFAULT_USERNAME
-    if auth_mode in {"auto", "keychain"} and not username:
-        username = find_keychain_account(server)
     if auth_mode in {"auto", "keychain"}:
+        username = username or find_keychain_account(server)
         if not username:
             if auth_mode == "keychain":
                 raise UploadError(
