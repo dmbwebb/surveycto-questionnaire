@@ -146,6 +146,28 @@ def read_keychain_password(server: str, username: str) -> str | None:
     return result.stdout.removesuffix("\n")
 
 
+def find_keychain_account(server: str) -> str | None:
+    """Return the account of the server's Keychain item, if one exists.
+
+    Lets Keychain auth work when $SURVEYCTO_USERNAME is unset (agent shells
+    often skip ~/.zshrc). The password itself is not read here.
+    """
+    try:
+        result = subprocess.run(
+            ["/usr/bin/security", "find-generic-password",
+             "-s", keychain_service(server)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return None
+    if result.returncode != 0:
+        return None
+    match = re.search(r'"acct"<blob>="([^"]*)"', result.stdout)
+    return match.group(1) if match else None
+
+
 def store_keychain_password(server: str, username: str) -> None:
     """Prompt securely and add or replace a per-server Keychain credential.
 
@@ -292,6 +314,8 @@ def load_session(
         return session
 
     username = username or DEFAULT_USERNAME
+    if auth_mode in {"auto", "keychain"} and not username:
+        username = find_keychain_account(server)
     if auth_mode in {"auto", "keychain"}:
         if not username:
             if auth_mode == "keychain":
